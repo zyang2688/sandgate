@@ -1,0 +1,127 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f5f6f7;
+  --panel: #ffffff;
+  --text: #1b1f24;
+  --muted: #626b76;
+  --line: #dde1e6;
+  --accent: #245fd6;
+  --accent-text: #ffffff;
+  --ok: #157347;
+  --ok-bg: #e7f5ed;
+  --bad: #b3261e;
+  --bad-bg: #fbeceb;
+  --warn: #8a5a00;
+  --code: #f0f2f4;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a;
+    --panel: #1d2125;
+    --text: #e8eaed;
+    --muted: #9aa3ad;
+    --line: #30363c;
+    --accent: #7ba4f5;
+    --accent-text: #0e1420;
+    --ok: #5fcf95;
+    --ok-bg: #16291f;
+    --bad: #f28b82;
+    --bad-bg: #331c1a;
+    --warn: #e0b45c;
+    --code: #14171a;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+}
+h2 { margin: 0; font-size: 15px; font-weight: 600; }
+code, pre, textarea, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+.top {
+  display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
+  padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.brand { font-weight: 700; font-size: 15px; }
+.tabs { display: flex; gap: 4px; }
+.tab { background: none; border: 0; padding: 6px 12px; border-radius: 6px; color: var(--muted); font: inherit; cursor: pointer; }
+.tab.active { color: var(--text); background: var(--bg); font-weight: 600; }
+main { max-width: 920px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+.view { display: flex; flex-direction: column; gap: 16px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+.narrow { max-width: 420px; margin: 48px auto 0; width: 100%; }
+.stack { display: flex; flex-direction: column; gap: 12px; }
+.tight { gap: 6px; }
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.between { justify-content: space-between; }
+.end { justify-content: flex-end; }
+.muted { color: var(--muted); margin: 0; font-size: 13px; }
+.error { color: var(--bad); margin: 0; min-height: 1em; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.wide { grid-column: 1 / -1; }
+label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+label.plain { display: block; }
+label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
+input:not([type=checkbox]), select, textarea {
+  width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--text); font-size: 13px;
+}
+label .row input { flex: 1; width: auto; min-width: 160px; }
+.btn {
+  padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel);
+  color: var(--text); font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap;
+}
+.btn:hover { border-color: var(--muted); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.btn.danger { border-color: var(--bad); color: var(--bad); }
+.btn.small { padding: 2px 8px; font-size: 12px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.status-card { border-radius: 10px; padding: 14px 16px; border: 1px solid var(--line); background: var(--panel); overflow-wrap: anywhere; }
+.status-card.protected { border-color: var(--ok); background: var(--ok-bg); }
+.status-card.exposed { border-color: var(--bad); background: var(--bad-bg); }
+.status-title { font-size: 17px; font-weight: 700; }
+.protected .status-title { color: var(--ok); }
+.exposed .status-title { color: var(--bad); }
+.alert { margin-top: 8px; padding: 6px 10px; border: 1px solid var(--warn); border-radius: 6px; color: var(--warn); }
+
+.gates { display: flex; flex-direction: column; margin-top: 8px; }
+.gate { padding: 10px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.gate:first-child { border-top: 0; }
+.gate-name { font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.gate .checks { margin-top: 6px; }
+.badge.closed { color: var(--bad); border-color: var(--bad); }
+.exit-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(140px, 1fr) auto; gap: 8px; align-items: center; font-size: 13px; overflow-wrap: anywhere; }
+
+.checks { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.checks li { display: grid; grid-template-columns: 18px minmax(120px, 200px) 1fr; gap: 8px; font-size: 13px; }
+.checks .detail { color: var(--muted); overflow-wrap: anywhere; }
+.mark.ok { color: var(--ok); }
+.mark.fail { color: var(--bad); }
+.mark.warn, .mark.pending { color: var(--warn); }
+
+.apps { display: flex; flex-direction: column; margin-top: 8px; }
+.app { display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.app:first-child { border-top: 0; }
+.app-main { min-width: 0; flex: 1 1 280px; overflow-wrap: anywhere; }
+.app-name { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.badge { font-size: 11px; font-weight: 500; padding: 0 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); }
+.badge.run { color: var(--ok); border-color: var(--ok); }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-start; }
+.code { background: var(--code); border-radius: 6px; padding: 10px; margin: 4px 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tall { max-height: 60vh; min-height: 120px; }
+.empty { color: var(--muted); padding: 20px 0 8px; text-align: center; }
+.dialog {
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text);
+  width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 18px;
+}
+.wide-dialog { width: min(800px, calc(100vw - 32px)); }
+.dialog::backdrop { background: rgba(0, 0, 0, .45); }
+@media (max-width: 560px) {
+  .checks li { grid-template-columns: 18px 1fr; }
+  .checks .detail { grid-column: 2; }
+}

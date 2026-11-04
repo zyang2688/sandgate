@@ -1,0 +1,13 @@
+{
+  "name": "sandgate",
+  "version": "0.1.0",
+  "description": "macOS per-app network sandbox manager: apps get network only while Clash TUN and a pinned node are healthy.",
+  "type": "module",
+  "private": true,
+  "bin": { "sandgate": "bin/sandgate.js" },
+  "scripts": {
+    "start": "node bin/sandgate.js",
+    "test": "node --test --test-timeout=30000"
+  },
+  "engines": { "node": ">=20" }
+}

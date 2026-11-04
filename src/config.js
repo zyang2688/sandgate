@@ -1,0 +1,210 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+
+export const DEFAULT_SETTINGS = Object.freeze({
+  uiPort: 7878,
+  gate: {
+    controller: { type: 'tcp', host: '127.0.0.1', port: 9097, socketPath: '', secret: '' },
+    defaultNode: '', // what Clash-routed traffic may use, besides DIRECT
+    listeners: {}, // node name → dedicated listener port; managed by the server
+    exitIps: {}, // node name → expected exit IP
+    rulesHash: '', // accepted fingerprint of the Clash rules
+    probeInterface: 'en0',
+    pfTargets: [], // node or group names whose servers pf may reach
+    pfExtra: [], // extra destinations for foreign DIRECT traffic
+    pfCnList: 'ruleset/sukka/china-ip.txt', // relative to the Clash Verge directory
+    requireTun: true,
+    requireNode: true,
+    requirePin: true,
+    stableSec: 6,
+    delayIntervalSec: 5,
+    pinIntervalSec: 15,
+    exitIntervalSec: 30,
+    delayTimeoutMs: 3000,
+    probeUrl: 'http://cp.cloudflare.com/generate_204',
+    exitIpUrl: 'https://api.ipify.org',
+  },
+});
+
+export class ValidationError extends Error {}
+
+const fail = (msg) => { throw new ValidationError(msg); };
+const hasControl = (s) => /[\x00-\x1f\x7f]/.test(s);
+
+export function expandPath(p, home = os.homedir()) {
+  if (typeof p !== 'string' || !p.trim() || hasControl(p)) fail(`路径无效: ${JSON.stringify(p)}`);
+  const expanded = p === '~' ? home : p.startsWith('~/') ? path.join(home, p.slice(2)) : p;
+  if (!path.isAbsolute(expanded)) fail(`必须是绝对路径: ${p}`);
+  return path.normalize(expanded);
+}
+
+const pathList = (v, label) => {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) fail(`${label} 必须是数组`);
+  return v.map((p) => expandPath(p));
+};
+
+/** Normalises untrusted API input into a stored sandbox instance. */
+export function validateApp(input, existing = {}) {
+  const name = String(input.name ?? '').trim();
+  if (!name || name.length > 64 || hasControl(name)) fail('名称需为 1-64 个字符');
+  const command = String(input.command ?? '').trim();
+  if (!command || hasControl(command)) fail('命令不能为空');
+  const args = input.args ?? [];
+  if (!Array.isArray(args) || args.some((a) => typeof a !== 'string' || a.includes('\0'))) fail('参数必须是字符串数组');
+  const env = input.env ?? {};
+  if (typeof env !== 'object' || Array.isArray(env)) fail('环境变量格式错误');
+  for (const [k, v] of Object.entries(env)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) || typeof v !== 'string' || v.includes('\0')) fail(`环境变量无效: ${k}`);
+  }
+  const network = input.network ?? 'gate';
+  if (!['gate', 'none'].includes(network)) fail('网络模式只能是 gate 或 none');
+  const node = String(input.node ?? '').trim();
+  if (hasControl(node)) fail('节点名无效');
+  if (network === 'gate' && !node) fail('请选择节点');
+  return {
+    id: existing.id ?? crypto.randomBytes(5).toString('hex'),
+    name,
+    command,
+    args,
+    cwd: input.cwd ? expandPath(input.cwd) : '',
+    env,
+    network,
+    node: network === 'gate' ? node : '',
+    port: existing.port ?? null,
+    isolateHome: input.isolateHome !== false,
+    allowUnixSockets: Boolean(input.allowUnixSockets),
+    blockBrokers: input.blockBrokers !== false,
+    restrictWrites: Boolean(input.restrictWrites),
+    writable: pathList(input.writable, '可写路径'),
+    protected: pathList(input.protected, '受保护路径'),
+  };
+}
+
+function validPort(v, label) {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) fail(`${label} 端口无效`);
+  return n;
+}
+
+function posNum(v, label, min = 1) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < min) fail(`${label} 需不小于 ${min}`);
+  return n;
+}
+
+function httpUrl(v, label) {
+  let u;
+  try { u = new URL(String(v)); } catch { fail(`${label} 不是合法 URL`); }
+  if (!['http:', 'https:'].includes(u.protocol)) fail(`${label} 必须是 http(s)`);
+  return u.toString();
+}
+
+/** Merges a partial patch. An omitted secret is kept; server-managed fields are ignored. */
+export function mergeGateSettings(current, patch = {}) {
+  const { listeners: _listeners, rulesHash: _rulesHash, ...safe } = patch;
+  const c = { ...current.controller, ...(patch.controller ?? {}) };
+  if (!['tcp', 'unix'].includes(c.type)) fail('控制接口类型只能是 tcp 或 unix');
+  if (c.type === 'unix' && c.socketPath) c.socketPath = expandPath(c.socketPath);
+  c.port = validPort(c.port, '控制接口');
+  if (c.host !== '127.0.0.1' && c.host !== 'localhost') fail('控制接口只允许本机地址');
+  if (typeof c.secret !== 'string') fail('密钥格式错误');
+
+  const g = { ...current, ...safe, controller: c };
+  g.defaultNode = String(g.defaultNode ?? '');
+  for (const k of ['requireTun', 'requireNode', 'requirePin']) g[k] = Boolean(g[k]);
+  if (typeof g.exitIps !== 'object' || g.exitIps === null || Array.isArray(g.exitIps)) fail('出口 IP 格式错误');
+  g.exitIps = Object.fromEntries(Object.entries(g.exitIps).map(([k, v]) => [k, String(v).trim()]).filter(([, v]) => v));
+  if (!/^en[0-9]+$/.test(String(g.probeInterface))) fail('探测网卡名无效，例如 en0');
+  if (!Array.isArray(g.pfTargets) || g.pfTargets.some((t) => typeof t !== 'string' || !t.trim() || hasControl(t))) fail('放行节点格式错误');
+  g.pfTargets = [...new Set(g.pfTargets.map((t) => t.trim()))];
+  if (!Array.isArray(g.pfExtra)) fail('额外放行格式错误');
+  g.pfExtra = [...new Set(g.pfExtra.map((c) => String(c).trim()).filter(Boolean))];
+  for (const c of g.pfExtra) {
+    const m = c.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/);
+    const prefix = m?.[5] === undefined ? 32 : Number(m[5]);
+    const first = Number(m?.[1]);
+    if (!m || m.slice(1, 5).some((o) => Number(o) > 255) || prefix < 8 || prefix > 32 || first === 0 || first === 127 || first >= 224) fail(`额外放行无效: ${c}（需为 IPv4，前缀至少 /8）`);
+  }
+  if (typeof g.pfCnList !== 'string' || !g.pfCnList.trim() || g.pfCnList.startsWith('/') || g.pfCnList.includes('..') || hasControl(g.pfCnList)) fail('国内 IP 列表路径无效');
+  g.stableSec = posNum(g.stableSec, '稳定时长', 1);
+  g.delayIntervalSec = posNum(g.delayIntervalSec, '延迟检查间隔', 1);
+  g.pinIntervalSec = posNum(g.pinIntervalSec, '钉死检查间隔', 2);
+  g.exitIntervalSec = posNum(g.exitIntervalSec, '出口检查间隔', 5);
+  g.delayTimeoutMs = posNum(g.delayTimeoutMs, '延迟超时', 100);
+  g.probeUrl = httpUrl(g.probeUrl, '探测地址');
+  g.exitIpUrl = httpUrl(g.exitIpUrl, '出口 IP 地址');
+  return g;
+}
+
+export class Store {
+  constructor(dir = process.env.SANDGATE_HOME || path.join(os.homedir(), '.sandgate')) {
+    this.dir = dir;
+    this.path = path.join(dir, 'config.json');
+    this.tokenPath = path.join(dir, 'token');
+    this.logDir = path.join(dir, 'logs');
+    this.profileDir = path.join(dir, 'profiles');
+    // Outside `dir`: every sandbox is denied `dir`, but needs its own instance home.
+    this.instancesDir = `${dir}-instances`;
+    for (const d of [dir, this.logDir, this.profileDir, this.instancesDir]) fs.mkdirSync(d, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
+    fs.chmodSync(this.instancesDir, 0o700);
+    this.data = this.#load();
+    this.token = this.#loadToken();
+  }
+
+  instanceHome(id) { return path.join(this.instancesDir, id); }
+
+  #load() {
+    const base = structuredClone({ ...DEFAULT_SETTINGS, apps: [], locked: false });
+    if (!fs.existsSync(this.path)) return base;
+    const raw = JSON.parse(fs.readFileSync(this.path, 'utf8'));
+    const gate = { ...base.gate, ...raw.gate, controller: { ...base.gate.controller, ...raw.gate?.controller } };
+    // Configs from before per-instance nodes had one global node and upstream port.
+    const { node: oldNode, upstreamPort: oldPort, expectedExitIp: _old, ...cleanGate } = gate;
+    if (oldNode) {
+      cleanGate.defaultNode ||= oldNode;
+      if (oldPort) cleanGate.listeners = { [oldNode]: oldPort, ...cleanGate.listeners };
+    }
+    const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
+    return { ...base, ...raw, gate: cleanGate, apps };
+  }
+
+  #loadToken() {
+    if (fs.existsSync(this.tokenPath)) return fs.readFileSync(this.tokenPath, 'utf8').trim();
+    const token = crypto.randomBytes(24).toString('base64url');
+    fs.writeFileSync(this.tokenPath, token + '\n', { mode: 0o600 });
+    return token;
+  }
+
+  save() {
+    const tmp = `${this.path}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, this.path);
+  }
+
+  /** Lowest port not used by any instance or listener; stable once assigned. */
+  allocatePort() {
+    const used = new Set([
+      ...this.data.apps.map((a) => a.port),
+      ...Object.values(this.data.gate.listeners),
+      this.data.uiPort,
+    ]);
+    let p = 17890;
+    while (used.has(p)) p++;
+    return p;
+  }
+
+  /** Each node gets one listener, shared by every instance that uses it. */
+  listenerPort(node) {
+    const { listeners } = this.data.gate;
+    listeners[node] ??= this.allocatePort();
+    return listeners[node];
+  }
+
+  usedNodes() {
+    return [...new Set(this.data.apps.filter((a) => a.network === 'gate' && a.node).map((a) => a.node))];
+  }
+}

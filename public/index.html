@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SandGate</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">SandGate</div>
+    <nav id="tabs" class="tabs" aria-label="页面">
+      <button data-tab="overview" class="tab active">总览</button>
+      <button data-tab="settings" class="tab">配置</button>
+      <button data-tab="preflight" class="tab">环境检查</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="login" class="panel narrow" hidden>
+      <h2>输入访问令牌</h2>
+      <p class="muted">令牌在 <code>~/.sandgate/token</code>，启动时终端打印的链接已包含它。</p>
+      <form id="login-form" class="stack">
+        <input id="login-token" type="password" autocomplete="off" aria-label="访问令牌" required>
+        <button class="btn primary">登录</button>
+      </form>
+      <p id="login-error" class="error" role="alert"></p>
+    </section>
+
+    <div id="view-overview" class="view" hidden>
+      <section id="protection" class="status-card unknown" aria-live="polite">
+        <div id="protection-title" class="status-title">全机防护</div>
+        <div id="protection-detail" class="muted"></div>
+        <div id="guard-detail" class="muted"></div>
+        <div id="rules-alert" class="row alert" hidden>
+          <span>Clash 规则已变化，可能有流量改走直连。请确认是你改的。</span>
+          <button id="accept-rules" class="btn small">确认无误</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="row between">
+          <h2>实例节点闸门</h2>
+          <button id="lock-btn" class="btn danger">断开所有实例</button>
+        </div>
+        <div id="gates" class="gates"></div>
+      </section>
+
+      <section class="panel">
+        <div class="row between">
+          <h2>沙盒实例</h2>
+          <button id="add-app" class="btn primary">新建实例</button>
+        </div>
+        <div id="apps" class="apps"></div>
+      </section>
+    </div>
+
+    <div id="view-settings" class="view" hidden>
+      <form id="settings-form" class="stack">
+        <section class="panel stack">
+          <div class="row between">
+            <h2>Clash 控制接口</h2>
+            <button type="button" id="detect" class="btn">从 Clash Verge 读取</button>
+          </div>
+          <div class="grid">
+            <label>连接方式
+              <select name="ctype"><option value="tcp">TCP</option><option value="unix">Unix socket</option></select>
+            </label>
+            <label>端口 <input name="cport" type="number" min="1" max="65535"></label>
+            <label class="wide">Socket 路径 <input name="csock" spellcheck="false"></label>
+            <label class="wide">密钥 <input name="csecret" type="password" autocomplete="off"></label>
+          </div>
+          <p id="detect-note" class="muted"></p>
+        </section>
+
+        <section class="panel stack">
+          <h2>全机防护（pf）</h2>
+          <p class="muted">物理网卡只能连放行的节点、国内 IP 和局域网。Clash 中断时国外全部被拦，系统 DNS 也被拦，依赖域名的程序基本都会断网。下面的命令需要你在终端里执行。</p>
+          <pre id="pf-commands" class="code"></pre>
+          <div class="grid">
+            <label class="wide">放行的节点或组（每行一个，组成员和链式节点会自动展开，随订阅更新）
+              <textarea name="pfTargets" rows="3" spellcheck="false" placeholder="US&#10;SG_Residential"></textarea>
+            </label>
+            <label class="wide">额外放行（每行一个 IPv4 或网段，用于走 DIRECT 的国外目标，前缀至少 /8）
+              <textarea name="pfExtra" rows="2" spellcheck="false"></textarea>
+            </label>
+            <label>国内 IP 列表（相对 Clash Verge 目录）<input name="pfCnList" spellcheck="false"></label>
+            <label>检测直连用的网卡 <input name="probeIface" spellcheck="false"></label>
+            <label>默认分流允许的节点（留空不检查）<input name="defaultNode" list="node-list" spellcheck="false"></label>
+          </div>
+          <ul id="pf-plan" class="checks"></ul>
+          <p class="muted">SandGate 运行时会每 15 秒按配置重算放行列表，试运行中的 pf 每 30 秒同步一次。不在放行列表里的节点连不上，不会切过去。</p>
+        </section>
+
+        <section class="panel stack">
+          <div class="row between">
+            <h2>实例节点的 listeners</h2>
+            <button type="button" id="copy-snippet" class="btn small">复制</button>
+          </div>
+          <pre id="snippet" class="code"></pre>
+          <p class="muted">加入 Clash Verge 的 Merge 配置后重载。从这些端口进入的流量不经过规则，只走对应节点。新增节点后需要重新添加。</p>
+          <div id="exit-ips" class="stack tight"></div>
+        </section>
+
+        <section class="panel stack">
+          <h2>闸门放行条件</h2>
+          <div class="stack tight">
+            <label class="check"><input type="checkbox" name="requireTun"> TUN 正常运行</label>
+            <label class="check"><input type="checkbox" name="requireNode"> 节点延迟测试通过</label>
+            <label class="check"><input type="checkbox" name="requirePin"> 探测流量确实走了该节点</label>
+          </div>
+          <div class="grid">
+            <label>稳定多久后放行（秒）<input name="stable" type="number" min="1"></label>
+            <label>延迟检查间隔（秒）<input name="delayInt" type="number" min="1"></label>
+            <label>钉死检查间隔（秒）<input name="pinInt" type="number" min="2"></label>
+            <label>出口检查间隔（秒）<input name="exitInt" type="number" min="5"></label>
+            <label>延迟超时（毫秒）<input name="delayTo" type="number" min="100"></label>
+            <label class="wide">探测地址 <input name="probeUrl" spellcheck="false"></label>
+            <label class="wide">出口 IP 查询地址 <input name="exitUrl" spellcheck="false"></label>
+          </div>
+        </section>
+
+        <div class="row">
+          <button class="btn primary">保存</button>
+          <span class="muted">保存后所有闸门会先关闭，重新检查通过后再放行。</span>
+          <span id="settings-msg" class="muted" role="status"></span>
+        </div>
+      </form>
+    </div>
+
+    <div id="view-preflight" class="view" hidden>
+      <section class="panel">
+        <div class="row between">
+          <h2>环境检查</h2>
+          <button id="rerun-preflight" class="btn">重新检查</button>
+        </div>
+        <ul id="preflight" class="checks"></ul>
+      </section>
+    </div>
+  </main>
+
+  <datalist id="node-list"></datalist>
+
+  <dialog id="app-dialog" class="dialog">
+    <form id="app-form" class="stack" method="dialog">
+      <h2 id="app-dialog-title">新建实例</h2>
+      <label id="preset-field">预设
+        <select name="preset">
+          <option value="cli">命令行程序</option>
+          <option value="chromium">Chromium / Electron 应用</option>
+        </select>
+      </label>
+      <p id="preset-note" class="muted"></p>
+      <label>名称 <input name="name" required maxlength="64"></label>
+      <label>命令或 .app 路径 <input name="command" required spellcheck="false" placeholder="/usr/bin/curl"></label>
+      <label>网络
+        <select name="network">
+          <option value="gate">经指定节点联网</option>
+          <option value="none">完全禁网</option>
+        </select>
+      </label>
+      <label id="node-field">节点（所有流量都走它，不按 Clash 规则分流）
+        <input name="node" list="node-list" spellcheck="false">
+      </label>
+      <label class="check"><input type="checkbox" name="isolateHome"> 使用独立数据目录（同一程序多开时需要）</label>
+      <label>参数（每行一个；{port} 为闸门端口，{home} 为数据目录）<textarea name="args" rows="3" spellcheck="false"></textarea></label>
+      <label>工作目录 <input name="cwd" spellcheck="false" placeholder="~/project"></label>
+      <label>环境变量（每行 KEY=VALUE）<textarea name="env" rows="2" spellcheck="false"></textarea></label>
+      <label class="check"><input type="checkbox" name="blockBrokers"> 禁止通过系统服务联网或拉起其他 App（GUI 应用通常需关闭）</label>
+      <label class="check"><input type="checkbox" name="allowUnixSockets"> 允许 Unix socket（GUI 应用通常需开启）</label>
+      <label class="check"><input type="checkbox" name="restrictWrites"> 只允许写入临时目录、工作目录、数据目录和下列路径</label>
+      <label>可写路径（每行一个）<textarea name="writable" rows="2" spellcheck="false"></textarea></label>
+      <label>额外受保护路径（禁止读写，每行一个）<textarea name="protected" rows="2" spellcheck="false"></textarea></label>
+      <p id="app-error" class="error" role="alert"></p>
+      <div class="row end">
+        <button type="button" id="app-cancel" class="btn">取消</button>
+        <button type="submit" class="btn primary" value="save">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="output-dialog" class="dialog wide-dialog">
+    <div class="stack">
+      <div class="row between">
+        <h2 id="output-title"></h2>
+        <button id="output-close" class="btn">关闭</button>
+      </div>
+      <ul id="output-list" class="checks"></ul>
+      <pre id="output-text" class="code tall"></pre>
+    </div>
+  </dialog>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
