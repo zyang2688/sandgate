@@ -269,6 +269,18 @@
 
   <datalist id="target-list"></datalist>
 
+  <dialog id="confirm-dialog" class="dialog">
+    <div class="stack">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-detail"></p>
+      <p id="confirm-error" class="error" role="alert"></p>
+      <div class="row end">
+        <button type="button" id="confirm-cancel" class="btn">取消</button>
+        <button type="button" id="confirm-ok" class="btn danger">删除</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog id="output-dialog" class="dialog wide-dialog">
     <div class="stack">
       <div class="row between">

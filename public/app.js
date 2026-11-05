@@ -215,8 +215,34 @@ $('accept-rules').addEventListener('click', async () => {
   catch (err) { handleError(err); }
 });
 
-// Two-step delete: native confirm() dialogs block the whole page.
-const armedDelete = { id: null, timer: null };
+// Our own dialog: native confirm() blocks the whole page, including status updates.
+let confirmAction = null;
+
+function askConfirm({ title, detail, action }) {
+  $('confirm-title').textContent = title;
+  $('confirm-detail').textContent = detail;
+  $('confirm-error').textContent = '';
+  $('confirm-ok').disabled = false;
+  confirmAction = action;
+  $('confirm-dialog').showModal();
+  $('confirm-cancel').focus(); // Enter must not delete anything by accident
+}
+
+$('confirm-cancel').addEventListener('click', () => $('confirm-dialog').close());
+
+$('confirm-ok').addEventListener('click', async () => {
+  $('confirm-ok').disabled = true;
+  $('confirm-error').textContent = '';
+  try {
+    await confirmAction();
+    $('confirm-dialog').close();
+  } catch (err) {
+    if (err instanceof AuthError) { $('confirm-dialog').close(); return showLogin(); }
+    $('confirm-error').textContent = err.message;
+    $('confirm-ok').disabled = false;
+  }
+  return undefined;
+});
 
 $('apps').addEventListener('click', async (e) => {
   const btn = e.target.closest('button[data-act]');
@@ -227,19 +253,16 @@ $('apps').addEventListener('click', async (e) => {
     if (act === 'edit') return openAppDialog(app);
     if (act === 'duplicate') return openAppDialog(app, { duplicate: true });
     if (act === 'delete') {
-      if (armedDelete.id !== id) {
-        clearTimeout(armedDelete.timer);
-        armedDelete.id = id;
-        actionInFlight = true;
-        btn.textContent = '确认删除（含数据目录）';
-        armedDelete.timer = setTimeout(() => { armedDelete.id = null; actionInFlight = false; refresh(); }, 3000);
-        return;
-      }
-      clearTimeout(armedDelete.timer);
-      armedDelete.id = null;
-      actionInFlight = false;
-      await api(`apps/${id}`, { method: 'DELETE', body: {} });
-    } else if (act === 'logs') {
+      return askConfirm({
+        title: `删除实例「${app.name}」？`,
+        detail: `它的数据目录 ~/.sandgate-instances/${id} 会一起删除，无法恢复。${app.isolateHome ? '里面的配置、缓存和登录状态都会丢失。' : '程序放在你用户目录里的数据不受影响。'}`,
+        action: async () => {
+          await api(`apps/${id}`, { method: 'DELETE', body: {} });
+          refresh();
+        },
+      });
+    }
+    if (act === 'logs') {
       const { text } = await api(`apps/${id}/logs`);
       return showOutput(`日志：${app.name}`, text || '（暂无日志）');
     } else if (act === 'profile') {
@@ -683,10 +706,15 @@ $('net-list').addEventListener('click', async (e) => {
   const profile = netProfiles.find((p) => p.id === btn.dataset.id);
   try {
     if (btn.dataset.net === 'edit') return await openNetDialog(profile);
-    if (btn.textContent !== '确认删除') { btn.textContent = '确认删除'; return undefined; }
-    const r = await api(`netprofiles/${profile.id}`, { method: 'DELETE', body: {} });
-    await loadNetProfiles();
-    renderSync(r.sync);
+    askConfirm({
+      title: `删除网络配置「${profile.name}」？`,
+      detail: profile.mode === 'custom' ? '它的出口替换和额外规则会一起删除，Clash 会自动重新加载。' : 'Clash 会自动重新加载。',
+      action: async () => {
+        const r = await api(`netprofiles/${profile.id}`, { method: 'DELETE', body: {} });
+        await loadNetProfiles();
+        renderSync(r.sync);
+      },
+    });
   } catch (err) {
     if (err instanceof AuthError) return showLogin();
     $('net-sync-state').textContent = err.message;
