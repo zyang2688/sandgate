@@ -18,6 +18,17 @@ export function nscurlBlocked(code, stderr) {
 }
 const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 const usesPort = (app) => ['gate', 'rules'].includes(app.network);
+
+// These stand in for what the outer sandbox takes away. Without that sandbox they would
+// only switch off the program's own protection, leaving no layer at all.
+const SANDBOX_ONLY_ARGS = new Set(['--no-sandbox', '--use-mock-keychain']);
+
+/** The final argument list: drops flags that do not apply to how this instance runs. */
+export function instanceArgs(app) {
+  return app.args
+    .filter((a) => app.port || !a.includes('{port}'))
+    .filter((a) => !app.unsandboxed || !SANDBOX_ONLY_ARGS.has(a));
+}
 const LOG_LIMIT = 10 * 1024 * 1024;
 const WATCH_MS = 2000;
 const TAIL_BYTES = 64 * 1024;
@@ -100,6 +111,7 @@ export class AppManager {
   isRunning(id) { return this.runs.has(id); }
 
   profileFor(app) {
+    if (app.unsandboxed) return ';; 这个实例不套沙盒，没有沙盒配置。程序能读写你的文件，网络也不由系统强制。\n';
     return buildProfile(app, {
       port: app.port,
       sandgateDir: this.store.dir,
@@ -133,19 +145,19 @@ export class AppManager {
     if (!app) throw new Error('应用不存在');
     if (this.runs.has(id)) throw new Error('应用已在运行');
     await this.#ensurePort(app);
-    const profile = this.#writeProfile(app);
+    const profile = app.unsandboxed ? null : this.#writeProfile(app);
     const command = await resolveCommand(app.command);
     const home = this.store.instanceHome(id);
     this.#prepareDataDir(app);
     const vars = { port: app.port, home: app.isolateHome ? home : process.env.HOME, data: home };
-    // An instance following Clash's rules has no port, so a preset's proxy flag does not apply.
-    const args = app.args.filter((a) => app.port || !a.includes('{port}')).map((a) => expandVars(a, vars));
+    const args = instanceArgs(app).map((a) => expandVars(a, vars));
     const logPath = this.#logPath(id);
     fs.appendFileSync(logPath, `\n=== ${new Date().toISOString()} start ${command} ===\n`, { mode: 0o600 });
     // The instance writes to the file itself, so it keeps logging while SandGate restarts.
     const logFd = fs.openSync(logPath, 'a', 0o600);
 
-    const child = spawn(this.sandboxExec, ['-f', profile, command, ...args], {
+    const [file, argv] = app.unsandboxed ? [command, args] : [this.sandboxExec, ['-f', profile, command, ...args]];
+    const child = spawn(file, argv, {
       cwd: app.cwd || (app.isolateHome ? home : undefined),
       env: buildEnv(app, app.port, process.env, home),
       stdio: ['ignore', logFd, logFd],
@@ -301,6 +313,7 @@ export class AppManager {
     const app = this.find(id);
     if (!app) throw new Error('应用不存在');
     await this.#ensurePort(app);
+    if (app.unsandboxed) return this.#verifyUnsandboxed(app);
     const profile = this.#writeProfile(app);
     const gateOpen = this.gates.isOpen(app.node);
     this.#prepareDataDir(app);
@@ -355,6 +368,27 @@ export class AppManager {
     fs.rmSync(writeProbe, { force: true });
     if (usesPort(app)) {
       const code = await inBox('/usr/bin/curl', ...curl, '-x', `http://127.0.0.1:${app.port}`, 'http://cp.cloudflare.com/generate_204');
+      results.push({
+        id: 'via-gate',
+        label: gateOpen ? '经闸门访问（闸门开，应成功）' : '经闸门访问（闸门关，应失败）',
+        ok: gateOpen ? code === 0 : code !== 0,
+        detail: code === 0 ? '请求成功' : `请求失败 (退出码 ${code})`,
+      });
+    }
+    return { ok: results.every((r) => r.ok), gateOpen, results };
+  }
+
+  /** There is nothing to escape from, so this says so rather than reporting passes. */
+  async #verifyUnsandboxed(app) {
+    const gateOpen = this.gates.isOpen(app.node);
+    const results = [{ id: 'unsandboxed', label: '沙盒', ok: true, detail: '这个实例不套沙盒，文件和网络都不受 SandGate 限制，所以没有越权操作可测' }];
+    if (usesPort(app)) {
+      let code = 0;
+      try {
+        await exec('/usr/bin/curl', ['-s', '-o', '/dev/null', '--max-time', '5', '-x', `http://127.0.0.1:${app.port}`, 'http://cp.cloudflare.com/generate_204'], { timeout: 15000 });
+      } catch (e) {
+        code = typeof e.code === 'number' ? e.code : -1;
+      }
       results.push({
         id: 'via-gate',
         label: gateOpen ? '经闸门访问（闸门开，应成功）' : '经闸门访问（闸门关，应失败）',

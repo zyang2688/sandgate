@@ -217,6 +217,12 @@
         <option value="Europe/London"></option>
         <option value="Europe/Frankfurt"></option>
       </datalist>
+      <label>参数（每行一个；{port} 为闸门端口，{data} 为实例目录，{home} 为程序的用户目录）<textarea name="args" rows="3" spellcheck="false"></textarea></label>
+      <label>工作目录 <input name="cwd" spellcheck="false" placeholder="~/project"></label>
+      <label>环境变量（每行 KEY=VALUE）<textarea name="env" rows="2" spellcheck="false"></textarea></label>
+      <label class="check"><input type="checkbox" name="unsandboxed"> 不套沙盒（默认关闭）</label>
+      <p id="unsandboxed-note" class="warn-note" hidden>程序能读写你的所有文件，网络也不由系统强制：走代理的流量走选定的出口，绕过代理的走 Clash 主规则。适合 Chrome 这类自带沙盒的程序，这样它的沙盒和钥匙串都能保留，启动时会自动去掉 --no-sandbox 和 --use-mock-keychain。已有实例切换这个选项后，Chrome 的登录状态会丢失。不要用来运行不信任的程序。</p>
+      <div id="sandbox-fields" class="stack">
       <label>数据环境
         <select name="dataMode">
           <option value="clone">独立数据（分身）</option>
@@ -225,14 +231,12 @@
       </label>
       <p id="data-mode-note" class="muted"></p>
       <label id="shared-field">共享文件夹（每行一个，分身可以读写，用来和主环境交换文件）<textarea name="shared" rows="2" spellcheck="false" placeholder="~/sandgate-shared"></textarea></label>
-      <label>参数（每行一个；{port} 为闸门端口，{data} 为实例目录，{home} 为程序的用户目录）<textarea name="args" rows="3" spellcheck="false"></textarea></label>
-      <label>工作目录 <input name="cwd" spellcheck="false" placeholder="~/project"></label>
-      <label>环境变量（每行 KEY=VALUE）<textarea name="env" rows="2" spellcheck="false"></textarea></label>
       <label class="check"><input type="checkbox" name="blockBrokers"> 禁止通过系统服务联网或拉起其他 App（GUI 应用通常需关闭）</label>
       <label class="check"><input type="checkbox" name="allowUnixSockets"> 允许 Unix socket（GUI 应用通常需开启）</label>
       <label class="check"><input type="checkbox" name="restrictWrites"> 只允许写入临时目录、工作目录、实例目录和下列路径</label>
       <label>可写路径（每行一个）<textarea name="writable" rows="2" spellcheck="false"></textarea></label>
       <label>额外受保护路径（禁止读写，每行一个）<textarea name="protected" rows="2" spellcheck="false"></textarea></label>
+      </div>
       <p id="app-error" class="error" role="alert"></p>
       <div class="row end">
         <button type="button" id="app-cancel" class="btn">取消</button>

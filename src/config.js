@@ -79,6 +79,8 @@ export function validateApp(input, existing = {}) {
   const node = String(input.node ?? '').trim();
   if (hasControl(node)) fail('节点名无效');
   if (['gate', 'rules'].includes(network) && !node) fail('请选择节点');
+  const unsandboxed = Boolean(input.unsandboxed ?? existing.unsandboxed);
+  if (unsandboxed && network === 'none') fail('不套沙盒时无法禁止联网，请选其他网络配置');
   return {
     id: existing.id ?? crypto.randomBytes(5).toString('hex'),
     name,
@@ -91,7 +93,9 @@ export function validateApp(input, existing = {}) {
     netProfile: String(input.netProfile ?? existing.netProfile ?? ''),
     node: ['gate', 'rules'].includes(network) ? node : '',
     port: existing.port ?? null,
-    isolateHome: input.isolateHome !== false,
+    unsandboxed,
+    // Without a sandbox a moved HOME isolates nothing, and it would hide the keychain.
+    isolateHome: !unsandboxed && input.isolateHome !== false,
     allowUnixSockets: Boolean(input.allowUnixSockets),
     blockBrokers: input.blockBrokers !== false,
     restrictWrites: Boolean(input.restrictWrites),
@@ -187,7 +191,7 @@ export class Store {
       cleanGate.defaultNode ||= oldNode;
       if (oldPort) cleanGate.listeners = { [oldNode]: oldPort, ...cleanGate.listeners };
     }
-    const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, shared: [], timezone: '', ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
+    const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, unsandboxed: false, shared: [], timezone: '', ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
     const netProfiles = raw.netProfiles ?? [];
     // Instances from before network profiles: each node becomes a profile, with the same behavior.
     for (const a of apps) {

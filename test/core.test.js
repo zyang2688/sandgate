@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
-import { AppManager, nscurlBlocked, stopRecordedInstances } from '../src/apps.js';
+import { AppManager, instanceArgs, nscurlBlocked, stopRecordedInstances } from '../src/apps.js';
 import { appLabel, groupApps } from '../public/grouping.js';
 import { detectVerge, ClashClient } from '../src/clash.js';
 import { Store, ValidationError, expandPath, mergeGateSettings, validateApp, DEFAULT_SETTINGS } from '../src/config.js';
@@ -2318,6 +2318,78 @@ describe('instances outlive a SandGate restart', () => {
   test('the service keeps launchd from cleaning up its instances', () => {
     const plist = buildPlist({ node: '/n', entry: '/a/bin/x.js', logFile: '/l', home: '/h' });
     assert.match(plist, /<key>AbandonProcessGroup<\/key><true\/>/);
+  });
+});
+
+describe('running without the sandbox', () => {
+  const base = { name: 'x', command: '/bin/sh', node: 'n' };
+
+  test('is off by default, and an edit keeps the choice', () => {
+    const a = validateApp(base);
+    assert.equal(a.unsandboxed, false);
+    assert.equal(a.isolateHome, true);
+    const on = validateApp({ ...base, unsandboxed: true });
+    assert.equal(on.unsandboxed, true);
+    assert.equal(validateApp(base, on).unsandboxed, true);
+  });
+
+  test('uses the real home, since a moved one would hide the keychain', () => {
+    const a = validateApp({ ...base, unsandboxed: true, isolateHome: true });
+    assert.equal(a.isolateHome, false);
+    assert.equal(buildEnv(a, 1, { HOME: '/Users/t' }, '/inst').HOME, '/Users/t');
+  });
+
+  test('refuses to look like it blocks the network', () => {
+    assert.throws(() => validateApp({ name: 'x', command: '/bin/sh', network: 'none', unsandboxed: true }), /无法禁止联网/);
+  });
+
+  test('never drops both layers: sandbox-only flags go when the sandbox goes', () => {
+    const args = ['--user-data-dir={data}/p', '--no-sandbox', '--use-mock-keychain', '--lang=en-US'];
+    assert.deepEqual(instanceArgs({ args, port: 1, unsandboxed: true }), ['--user-data-dir={data}/p', '--lang=en-US']);
+    assert.deepEqual(instanceArgs({ args, port: 1, unsandboxed: false }), args);
+  });
+
+  test('still drops the proxy flag when following Clash', () => {
+    assert.deepEqual(instanceArgs({ args: ['--proxy-server=x:{port}', '--a'], port: null, unsandboxed: true }), ['--a']);
+  });
+
+  test('runs without sandbox-exec, is adopted, and can be stopped', async (t) => {
+    const dir = tmp();
+    const store = new Store(path.join(dir, 'data'));
+    const processStart = async (pid) => `started-${pid}`;
+    const manager = () => new AppManager({ store, gates: { on() {}, isOpen: () => false }, controllerSocket: () => '', sandboxExec: '/nonexistent/sandbox-exec', processStart, watchMs: 40 });
+    const a = validateApp({ name: 'x', command: '/bin/sh', network: 'open', unsandboxed: true, args: ['-c', 'echo "args:$*"; echo "home:$HOME"; exec sleep 60', 'sh', '--no-sandbox', '--keep', '--use-mock-keychain'] });
+    store.data.apps.push(a);
+    const first = manager();
+    await first.start(a.id);
+    const { pid } = first.snapshot(a);
+    t.after(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } });
+    const log = () => fs.readFileSync(path.join(store.logDir, `${a.id}.log`), 'utf8');
+    for (let i = 0; i < 100 && !log().includes('home:'); i++) await sleep(20);
+    assert.match(log(), /args:--keep\n/);
+    assert.ok(log().includes(`home:${process.env.HOME}`));
+    assert.match(first.profileFor(a), /不套沙盒/);
+    await first.release();
+    const second = manager();
+    await second.adopt();
+    assert.equal(second.snapshot(a).pid, pid);
+    await second.stopAll();
+  });
+
+  test('the self-test says there is nothing to escape from', async () => {
+    const store = new Store(path.join(tmp(), 'data'));
+    const a = validateApp({ name: 'x', command: '/bin/sh', network: 'open', unsandboxed: true });
+    store.data.apps.push(a);
+    const m = new AppManager({ store, gates: { on() {}, isOpen: () => false }, controllerSocket: () => '', sandboxExec: '/nonexistent/sandbox-exec' });
+    const r = await m.verify(a.id);
+    assert.deepEqual(r.results.map((x) => x.id), ['unsandboxed']);
+    await m.release();
+  });
+
+  test('instances saved before this option stay sandboxed', () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ apps: [{ id: 'a', name: 'a', command: '/bin/ls', args: [], network: 'none' }] }));
+    assert.equal(new Store(dir).data.apps[0].unsandboxed, false);
   });
 });
 

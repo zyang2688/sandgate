@@ -148,8 +148,8 @@ function appCard(a) {
     : '';
   return `<div class="app">
     <div class="app-main">
-      <div class="app-name">${esc(a.name)} <span class="badge ${a.running ? 'run' : ''}">${a.running ? `运行中 ${a.pid}` : '已停止'}</span> ${node}</div>
-      <div class="muted mono">${esc([a.command, ...a.args.filter((x) => a.port || !x.includes('{port}'))].join(' '))}</div>
+      <div class="app-name">${esc(a.name)} <span class="badge ${a.running ? 'run' : ''}">${a.running ? `运行中 ${a.pid}` : '已停止'}</span> ${node}${a.unsandboxed ? ' <span class="badge closed">不套沙盒</span>' : ''}</div>
+      <div class="muted mono">${esc([a.command, ...a.args.filter((x) => (a.port || !x.includes('{port}')) && !(a.unsandboxed && ['--no-sandbox', '--use-mock-keychain'].includes(x)))].join(' '))}</div>
       <div class="muted">${esc(net + exit)}</div>
     </div>
     <div class="actions">
@@ -157,7 +157,7 @@ function appCard(a) {
       <button class="btn" data-act="duplicate" data-id="${a.id}">再开一个</button>
       <button class="btn" data-act="verify" data-id="${a.id}">泄漏自检</button>
       <button class="btn" data-act="logs" data-id="${a.id}">日志</button>
-      <button class="btn" data-act="profile" data-id="${a.id}">沙盒配置</button>
+      <button class="btn" data-act="profile" data-id="${a.id}" ${a.unsandboxed ? 'disabled' : ''}>沙盒配置</button>
       <button class="btn" data-act="edit" data-id="${a.id}">编辑</button>
       <button class="btn" data-act="delete" data-id="${a.id}" ${a.running ? 'disabled' : ''}>删除</button>
     </div>
@@ -318,7 +318,7 @@ const PRESETS = {
     apply(f) { f.blockBrokers.checked = true; f.allowUnixSockets.checked = false; },
   },
   chromium: {
-    note: '已加入独立的 --user-data-dir，可以多开；选“跟随 Clash”以外的配置时还会用 --proxy-server。共用数据模式也需要这个目录，否则窗口会并入已在运行的 Chrome，不走选定的节点。Chromium 自带沙盒不能嵌套，需要 --no-sandbox，渲染进程的隔离会减弱。实例不能用钥匙串，所以加了 --use-mock-keychain，保存的密码和 Cookie 不受钥匙串保护。',
+    note: '已加入独立的 --user-data-dir，可以多开；选“跟随 Clash”以外的配置时还会用 --proxy-server。共用数据模式也需要这个目录，否则窗口会并入已在运行的 Chrome，不走选定的节点。Chromium 自带沙盒不能嵌套，需要 --no-sandbox，渲染进程的隔离会减弱。实例不能用钥匙串，所以加了 --use-mock-keychain：登录状态能保留，但保存的密码和 Cookie 只用固定密钥加密，能读到文件的程序就能解开。',
     apply(f) {
       f.blockBrokers.checked = false;
       f.allowUnixSockets.checked = true;
@@ -341,9 +341,12 @@ function fillNetProfileSelect() {
 function syncNetworkField({ takeTimezone = false } = {}) {
   const f = $('app-form');
   const p = netProfiles.find((x) => x.id === f.netProfile.value);
-  $('net-profile-note').textContent = f.netProfile.value === 'follow' ? FOLLOW_NOTE
+  const off = f.unsandboxed.checked;
+  $('net-profile-note').textContent = f.netProfile.value === 'follow'
+    ? (off ? '和普通程序一样按 Clash 规则分流，git、SSH、内网都正常。走哪个出口由 Clash 决定。' : FOLLOW_NOTE)
     : f.netProfile.value === 'none' ? '程序完全不能联网。'
-      : p?.mode === 'node' ? `所有流量都走 ${p.node}，由系统强制，不支持代理的程序（包括 SSH）连不上。`
+      : p?.mode === 'node'
+        ? (off ? `走代理的流量都走 ${p.node}。不套沙盒时不由系统强制，绕过代理的流量走 Clash 主规则。` : `所有流量都走 ${p.node}，由系统强制，不支持代理的程序（包括 SSH）连不上。`)
         : '程序经专用端口进入这份规则，需要支持代理。不认代理的程序（如 SSH）走 Clash 的通用规则。';
   if (takeTimezone && p?.timezone) f.timezone.value = p.timezone;
 }
@@ -352,6 +355,17 @@ const DATA_MODE_NOTES = {
   clone: '程序看不到你的用户目录，配置、缓存和登录状态都存在实例目录里，删除实例时一起删除。程序、临时目录也和主环境分开。需要交换文件时用下面的共享文件夹。',
   shared: '程序照常使用你的用户目录，和直接打开时一样，只有网络被隔离。.ssh、钥匙串等受保护目录仍然不可访问。',
 };
+
+function syncSandbox() {
+  const f = $('app-form');
+  const off = f.unsandboxed.checked;
+  $('unsandboxed-note').hidden = !off;
+  $('sandbox-fields').hidden = off;
+  const none = [...f.netProfile.options].find((o) => o.value === 'none');
+  if (none) none.disabled = off;
+  if (off && f.netProfile.value === 'none') f.netProfile.value = 'follow';
+  syncNetworkField();
+}
 
 function syncDataMode() {
   const f = $('app-form');
@@ -367,6 +381,7 @@ function fillAppForm(f, app) {
   f.env.value = Object.entries(app.env).map(([k, v]) => `${k}=${v}`).join('\n');
   f.netProfile.value = app.netProfile || 'follow';
   f.timezone.value = app.timezone ?? '';
+  f.unsandboxed.checked = Boolean(app.unsandboxed);
   f.dataMode.value = app.isolateHome ? 'clone' : 'shared';
   f.shared.value = (app.shared ?? []).join('\n');
   f.blockBrokers.checked = app.blockBrokers;
@@ -400,6 +415,7 @@ function openAppDialog(app, { duplicate = false } = {}) {
   }
   syncNetworkField();
   syncDataMode();
+  syncSandbox();
   $('app-dialog').showModal();
 }
 
@@ -413,6 +429,7 @@ function applyPreset() {
 $('app-form').preset.addEventListener('change', applyPreset);
 $('app-form').netProfile.addEventListener('change', () => syncNetworkField({ takeTimezone: true }));
 $('app-form').dataMode.addEventListener('change', syncDataMode);
+$('app-form').unsandboxed.addEventListener('change', syncSandbox);
 $('add-app').addEventListener('click', () => openAppDialog());
 $('app-cancel').addEventListener('click', () => $('app-dialog').close());
 document.querySelectorAll('[data-close-dialog]').forEach((b) => {
@@ -436,6 +453,7 @@ $('app-form').addEventListener('submit', async (e) => {
     env,
     netProfile: f.netProfile.value,
     timezone: f.timezone.value.trim(),
+    unsandboxed: f.unsandboxed.checked,
     isolateHome: f.dataMode.value === 'clone',
     shared: lines(f.shared.value),
     blockBrokers: f.blockBrokers.checked,
