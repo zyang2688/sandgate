@@ -1,3 +1,5 @@
+import { groupApps } from './grouping.js';
+
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const lines = (s) => s.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -121,38 +123,61 @@ function bytes(n) {
 }
 
 let appsById = new Map();
+let lastApps = [];
+
+const GROUPING_KEY = 'sandgate.appGrouping';
+
+function savedGrouping() {
+  try { return localStorage.getItem(GROUPING_KEY) === 'app' ? 'app' : 'profile'; } catch { return 'profile'; }
+}
+
+$('app-grouping').value = savedGrouping();
+$('app-grouping').addEventListener('change', (e) => {
+  try { localStorage.setItem(GROUPING_KEY, e.target.value); } catch { /* the choice just lasts until reload */ }
+  renderApps(lastApps);
+});
+
+function appCard(a) {
+  const hasGate = ['gate', 'rules'].includes(a.network);
+  const net = hasGate
+    ? `闸门端口 ${a.port} · ${a.conns} 个连接 · ↑${bytes(a.stats.up)} ↓${bytes(a.stats.down)} · 拒绝 ${a.stats.refused}`
+    : a.network === 'open' ? '跟随 Clash 规则' : '完全禁网';
+  const exit = !a.running && a.lastExit ? ` · 上次退出码 ${a.lastExit.code ?? a.lastExit.signal}` : '';
+  const node = hasGate
+    ? `<span class="badge ${a.gateOpen ? 'run' : 'closed'}">${esc(netProfiles.find((p) => p.id === a.netProfile)?.name ?? a.node)}</span>`
+    : '';
+  return `<div class="app">
+    <div class="app-main">
+      <div class="app-name">${esc(a.name)} <span class="badge ${a.running ? 'run' : ''}">${a.running ? `运行中 ${a.pid}` : '已停止'}</span> ${node}</div>
+      <div class="muted mono">${esc([a.command, ...a.args.filter((x) => a.port || !x.includes('{port}'))].join(' '))}</div>
+      <div class="muted">${esc(net + exit)}</div>
+    </div>
+    <div class="actions">
+      <button class="btn ${a.running ? '' : 'primary'}" data-act="${a.running ? 'stop' : 'start'}" data-id="${a.id}">${a.running ? '停止' : '启动'}</button>
+      <button class="btn" data-act="duplicate" data-id="${a.id}">再开一个</button>
+      <button class="btn" data-act="verify" data-id="${a.id}">泄漏自检</button>
+      <button class="btn" data-act="logs" data-id="${a.id}">日志</button>
+      <button class="btn" data-act="profile" data-id="${a.id}">沙盒配置</button>
+      <button class="btn" data-act="edit" data-id="${a.id}">编辑</button>
+      <button class="btn" data-act="delete" data-id="${a.id}" ${a.running ? 'disabled' : ''}>删除</button>
+    </div>
+  </div>`;
+}
 
 function renderApps(apps) {
+  lastApps = apps;
   appsById = new Map(apps.map((a) => [a.id, a]));
   if (!apps.length) {
     $('apps').innerHTML = '<div class="empty">还没有实例。新建一个，再用「泄漏自检」确认沙盒有效。</div>';
     return;
   }
-  $('apps').innerHTML = apps.map((a) => {
-    const net = a.port
-      ? `闸门端口 ${a.port} · ${a.conns} 个连接 · ↑${bytes(a.stats.up)} ↓${bytes(a.stats.down)} · 拒绝 ${a.stats.refused}`
-      : a.network === 'open' ? '跟随 Clash 规则' : '完全禁网';
-    const exit = !a.running && a.lastExit ? ` · 上次退出码 ${a.lastExit.code ?? a.lastExit.signal}` : '';
-    const node = a.port
-      ? `<span class="badge ${a.gateOpen ? 'run' : 'closed'}">${esc(netProfiles.find((p) => p.id === a.netProfile)?.name ?? a.node)}</span>`
-      : '';
-    return `<div class="app">
-      <div class="app-main">
-        <div class="app-name">${esc(a.name)} <span class="badge ${a.running ? 'run' : ''}">${a.running ? `运行中 ${a.pid}` : '已停止'}</span> ${node}</div>
-        <div class="muted mono">${esc([a.command, ...a.args.filter((x) => a.port || !x.includes('{port}'))].join(' '))}</div>
-        <div class="muted">${esc(net + exit)}</div>
-      </div>
-      <div class="actions">
-        <button class="btn ${a.running ? '' : 'primary'}" data-act="${a.running ? 'stop' : 'start'}" data-id="${a.id}">${a.running ? '停止' : '启动'}</button>
-        <button class="btn" data-act="duplicate" data-id="${a.id}">再开一个</button>
-        <button class="btn" data-act="verify" data-id="${a.id}">泄漏自检</button>
-        <button class="btn" data-act="logs" data-id="${a.id}">日志</button>
-        <button class="btn" data-act="profile" data-id="${a.id}">沙盒配置</button>
-        <button class="btn" data-act="edit" data-id="${a.id}">编辑</button>
-        <button class="btn" data-act="delete" data-id="${a.id}" ${a.running ? 'disabled' : ''}>删除</button>
-      </div>
-    </div>`;
-  }).join('');
+  $('apps').innerHTML = groupApps(apps, $('app-grouping').value, netProfiles).map((g) => `
+    <div class="group-head">
+      <span>${esc(g.title)}</span>
+      <span class="badge ${g.running ? 'run' : ''}">${g.running}/${g.apps.length} 运行中</span>
+      ${g.detail ? `<span class="muted mono">${esc(g.detail)}</span>` : ''}
+    </div>
+    ${g.apps.map(appCard).join('')}`).join('');
 }
 
 let refreshing = false;

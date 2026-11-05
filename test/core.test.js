@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { AppManager, nscurlBlocked } from '../src/apps.js';
+import { appLabel, groupApps } from '../public/grouping.js';
 import { detectVerge, ClashClient } from '../src/clash.js';
 import { Store, ValidationError, expandPath, mergeGateSettings, validateApp, DEFAULT_SETTINGS } from '../src/config.js';
 import { Sandgate } from '../src/daemon.js';
@@ -2051,6 +2052,48 @@ describe('waking from sleep', () => {
     for (let i = 0; i < 8; i++) { advance(1000); mon.tick(); }
     assert.equal(mon.open, false);
     assert.match(reasons[0], /已过期/);
+  });
+});
+
+describe('grouping instances on the page', () => {
+  const inst = (name, command, netProfile, extra = {}) => ({ name, command, netProfile, network: 'gate', running: false, ...extra });
+  const profiles = [{ id: 'p1', name: '美国' }, { id: 'p2', name: '新加坡' }];
+  const apps = [
+    inst('n', '/bin/ls', 'none'),
+    inst('b', '/Applications/Google Chrome.app', 'p2', { running: true }),
+    inst('a', '/usr/bin/curl', 'p1'),
+    inst('c', '/Applications/Google Chrome.app', 'p1'),
+    inst('f', '/usr/bin/curl', 'follow'),
+  ];
+
+  test('by profile: follow first, no network last, profiles in their own order', () => {
+    const groups = groupApps(apps, 'profile', profiles);
+    assert.deepEqual(groups.map((g) => g.title), ['跟随 Clash 规则', '美国', '新加坡', '完全禁网']);
+    assert.deepEqual(groups[1].apps.map((a) => a.name), ['a', 'c']);
+    assert.equal(groups[2].running, 1);
+  });
+
+  test('by application: same program together, whatever its profile', () => {
+    const groups = groupApps(apps, 'app', profiles);
+    assert.deepEqual(groups.map((g) => g.title), ['curl', 'Google Chrome', 'ls']);
+    assert.deepEqual(groups[1].apps.map((a) => a.name), ['b', 'c']);
+    assert.equal(groups[1].detail, '/Applications/Google Chrome.app');
+  });
+
+  test('programs with the same name in different folders stay apart', () => {
+    const groups = groupApps([inst('x', '/a/tool', 'none'), inst('y', '/b/tool', 'none')], 'app');
+    assert.deepEqual(groups.map((g) => g.detail), ['/a/tool', '/b/tool']);
+  });
+
+  test('empty profiles do not appear, and an unknown profile still shows its instance', () => {
+    const groups = groupApps([inst('x', '/bin/ls', 'gone')], 'profile', profiles);
+    assert.deepEqual(groups.map((g) => g.title), ['gone']);
+  });
+
+  test('names programs without their path or .app', () => {
+    assert.equal(appLabel('/Applications/Visual Studio Code.app'), 'Visual Studio Code');
+    assert.equal(appLabel('/Applications/Foo.app/'), 'Foo');
+    assert.equal(appLabel('/usr/bin/curl'), 'curl');
   });
 });
 

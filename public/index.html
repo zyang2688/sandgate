@@ -51,7 +51,15 @@
       <section class="panel">
         <div class="row between">
           <h2>沙盒实例</h2>
-          <button id="add-app" class="btn primary">新建实例</button>
+          <div class="row">
+            <label class="inline">分组
+              <select id="app-grouping">
+                <option value="profile">按网络配置</option>
+                <option value="app">按应用程序</option>
+              </select>
+            </label>
+            <button id="add-app" class="btn primary">新建实例</button>
+          </div>
         </div>
         <div id="apps" class="apps"></div>
       </section>
@@ -134,6 +142,25 @@
         </div>
         <p class="muted">决定实例的流量怎么走。一个配置可以给多个实例用，修改后这些实例一起生效。</p>
         <div id="net-list" class="apps"></div>
+        <details class="help">
+          <summary>规则从哪来，出口怎么替换</summary>
+          <p><strong>基础规则</strong>就是 Clash Verge 合成后的主规则，包括你在它的「编辑规则」页改的规则和订阅自带的规则。在 Clash Verge 里改规则后，用这些规则的配置也会跟着更新。</p>
+          <p><strong>优先级</strong>从高到低：SandGate 配置的额外规则 → Clash Verge「编辑规则」页的规则 → 订阅自带的规则。</p>
+          <table>
+            <thead><tr><th>你想要的效果</th><th>写在哪</th></tr></thead>
+            <tbody>
+              <tr><td>所有程序都这样走</td><td>Clash Verge 的「编辑规则」页</td></tr>
+              <tr><td>只有某个配置的实例这样走</td><td>SandGate 配置的额外规则</td></tr>
+              <tr><td>换掉某个配置的出口，规则本身不变</td><td>SandGate 配置的替换出口</td></tr>
+            </tbody>
+          </table>
+          <p><strong>替换出口只改你选的组。</strong>规则指向哪个组，就只有替换了那个组才会变。比如只换 🌐 Proxy 时，CDN 规则如果指向 US 组，图片、脚本等静态资源仍走美国；DIRECT 规则仍走真实 IP。</p>
+          <ul>
+            <li>只想让主要流量换 IP：替换 🌐 Proxy 就够了。</li>
+            <li>想让代理流量都从同一个地区出去：把规则用到的组都替换掉。</li>
+            <li>所有流量都走同一个 IP：选“全部走一个节点”。</li>
+          </ul>
+        </details>
       </section>
       <section class="panel stack">
         <div class="row between">

@@ -105,6 +105,11 @@ label .row input { flex: 1; width: auto; min-width: 160px; }
 .mark.warn, .mark.pending { color: var(--warn); }
 
 .apps { display: flex; flex-direction: column; margin-top: 8px; }
+.inline { display: flex; flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; }
+.inline select { width: auto; }
+.group-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; padding: 14px 0 6px; font-weight: 600; }
+.group-head .muted { font-weight: 400; overflow-wrap: anywhere; }
+.group-head:first-child { padding-top: 4px; }
 .app { display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
 .app:first-child { border-top: 0; }
 .app-main { min-width: 0; flex: 1 1 280px; overflow-wrap: anywhere; }
@@ -125,3 +130,11 @@ label .row input { flex: 1; width: auto; min-width: 160px; }
   .checks li { grid-template-columns: 18px 1fr; }
   .checks .detail { grid-column: 2; }
 }
+
+.help { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); }
+.help summary { cursor: pointer; color: inherit; }
+.help p { margin: 10px 0; }
+.help strong { color: var(--text, inherit); }
+.help ul { margin: 8px 0; padding-left: 20px; }
+.help table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+.help th, .help td { text-align: left; padding: 6px 8px; border: 1px solid var(--line); }
