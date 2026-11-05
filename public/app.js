@@ -259,11 +259,11 @@ const PRESETS = {
     apply(f) { f.blockBrokers.checked = true; f.allowUnixSockets.checked = false; },
   },
   chromium: {
-    note: '已加入 --proxy-server 和独立的 --user-data-dir，可以多开。Chromium 自带沙盒不能嵌套，需要 --no-sandbox，渲染进程的隔离会减弱。',
+    note: '已加入 --proxy-server 和独立的 --user-data-dir，可以多开。Chromium 自带沙盒不能嵌套，需要 --no-sandbox，渲染进程的隔离会减弱。实例不能用钥匙串，所以加了 --use-mock-keychain，保存的密码和 Cookie 不受钥匙串保护。',
     apply(f) {
       f.blockBrokers.checked = false;
       f.allowUnixSockets.checked = true;
-      if (!f.args.value.trim()) f.args.value = '--proxy-server=socks5://127.0.0.1:{port}\n--user-data-dir={home}/profile\n--no-sandbox';
+      if (!f.args.value.trim()) f.args.value = '--proxy-server=socks5://127.0.0.1:{port}\n--user-data-dir={home}/profile\n--no-sandbox\n--use-mock-keychain\n--no-first-run\n--no-default-browser-check';
     },
   },
 };

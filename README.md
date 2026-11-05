@@ -120,8 +120,10 @@ bash scripts/sandgate-pf.sh render           # 只打印规则
 - **实例内没有分流。** 国内网站也走选定的节点。
 - **`sandbox-exec` 已被 Apple 标记为弃用。** 目前可用，但没有长期保证。
 - **系统服务可能是漏点。** 应用可能通过 XPC 请求沙盒外的系统服务联网。配置拦截了已知的几个，但无法保证覆盖全部。请用「泄漏自检」确认，GUI 应用尤其要注意。
-- **钥匙串不可用。** `~/Library/Keychains` 被禁止访问，依赖它保存登录状态的应用可能无法登录。
+- **钥匙串不可用。** `~/Library/Keychains` 被禁止访问，依赖它保存登录状态的应用可能无法登录，也可能弹出“找不到钥匙串”。遇到这个弹窗请点 Cancel，不要点 Reset To Defaults。
 - **Chromium / Electron 需要 `--no-sandbox`。** 渲染进程的隔离会减弱。
+- **Chrome 需要 `--use-mock-keychain`。** 预设已包含，否则启动时会弹出找不到钥匙串。这样实例里保存的密码和 Cookie 不受钥匙串保护，只靠沙盒隔离和文件权限。
+- **Chrome 会在实例目录里安装更新程序。** 它把 `GoogleUpdater` 和对应的 LaunchAgent 文件写进实例目录。如果系统里没有同名任务，它可能被注册到沙盒之外运行。
 
 ## 开始使用
 
