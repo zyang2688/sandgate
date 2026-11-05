@@ -154,7 +154,7 @@ function appCard(a) {
     </div>
     <div class="actions">
       <button class="btn ${a.running ? '' : 'primary'}" data-act="${a.running ? 'stop' : 'start'}" data-id="${a.id}">${a.running ? '停止' : '启动'}</button>
-      <button class="btn" data-act="duplicate" data-id="${a.id}">再开一个</button>
+      <button class="btn" data-act="duplicate" data-id="${a.id}">使用相同配置新建实例</button>
       <button class="btn" data-act="verify" data-id="${a.id}">泄漏自检</button>
       <button class="btn" data-act="logs" data-id="${a.id}">日志</button>
       <button class="btn" data-act="profile" data-id="${a.id}" ${a.unsandboxed ? 'disabled' : ''}>沙盒配置</button>
@@ -403,7 +403,7 @@ function openAppDialog(app, { duplicate = false } = {}) {
     fillAppForm(f, app);
     if (duplicate) {
       f.name.value = `${app.name} 2`;
-      $('app-dialog-title').textContent = `再开一个：${app.name}`;
+      $('app-dialog-title').textContent = `使用相同配置新建实例：${app.name}`;
     } else {
       $('app-dialog-title').textContent = `编辑：${app.name}${app.running ? '（重启后生效）' : ''}`;
     }
