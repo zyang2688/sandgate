@@ -187,7 +187,10 @@
 
   <dialog id="app-dialog" class="dialog">
     <form id="app-form" class="stack" method="dialog">
-      <h2 id="app-dialog-title">新建实例</h2>
+      <div class="dialog-head">
+        <h2 id="app-dialog-title">新建实例</h2>
+        <button type="button" class="dialog-close" data-close-dialog aria-label="关闭" title="关闭">×</button>
+      </div>
       <label id="preset-field">预设
         <select name="preset">
           <option value="cli">命令行程序</option>
@@ -195,7 +198,7 @@
         </select>
       </label>
       <p id="preset-note" class="muted"></p>
-      <label>名称 <input name="name" required maxlength="64"></label>
+      <label>名称 <input name="name" required maxlength="64" autofocus></label>
       <label>命令或 .app 路径 <input name="command" required spellcheck="false" placeholder="/usr/bin/curl"></label>
       <label>网络配置
         <select name="netProfile"></select>
@@ -240,8 +243,11 @@
 
   <dialog id="net-dialog" class="dialog">
     <form id="net-form" class="stack" method="dialog">
-      <h2 id="net-dialog-title">新建配置</h2>
-      <label>名称 <input name="name" required maxlength="64"></label>
+      <div class="dialog-head">
+        <h2 id="net-dialog-title">新建配置</h2>
+        <button type="button" class="dialog-close" data-close-dialog aria-label="关闭" title="关闭">×</button>
+      </div>
+      <label>名称 <input name="name" required maxlength="64" autofocus></label>
       <label>模式
         <select name="mode">
           <option value="custom">在 Clash 规则上修改</option>

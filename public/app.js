@@ -412,6 +412,9 @@ $('app-form').netProfile.addEventListener('change', () => syncNetworkField({ tak
 $('app-form').dataMode.addEventListener('change', syncDataMode);
 $('add-app').addEventListener('click', () => openAppDialog());
 $('app-cancel').addEventListener('click', () => $('app-dialog').close());
+document.querySelectorAll('[data-close-dialog]').forEach((b) => {
+  b.addEventListener('click', () => b.closest('dialog').close());
+});
 
 $('app-form').addEventListener('submit', async (e) => {
   e.preventDefault();
