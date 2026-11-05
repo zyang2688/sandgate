@@ -16,7 +16,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     pfExtra: [], // extra destinations for foreign DIRECT traffic
     pfCnList: 'ruleset/sukka/china-ip.txt', // relative to the Clash Verge directory
     requireTun: true,
-    requireNode: true,
+    requireNode: false, // a dead node only fails its connections, so it need not close the gate
     requirePin: true,
     stableSec: 6,
     delayIntervalSec: 5,

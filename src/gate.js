@@ -43,6 +43,9 @@ export async function fetchExitIp(upstreamPort, url) {
  * Opens a real tunnel through the listener and asks mihomo which proxy carries it.
  * This catches a mis-set listener or a port now serving a different node.
  */
+/** Traffic demonstrably took another route. Anything else only means the probe got no answer. */
+export class PinMismatch extends Error {}
+
 export async function verifyPin({ upstreamPort, probeUrl, node, client, findTimeoutMs = 6000 }) {
   const { hostname, port, protocol } = new URL(probeUrl);
   const authority = `${hostname}:${port || (protocol === 'https:' ? 443 : 80)}`;
@@ -72,7 +75,7 @@ export async function verifyPin({ upstreamPort, probeUrl, node, client, findTime
       const conn = connections.find((c) => String(c.metadata?.sourcePort) === localPort);
       if (conn) {
         const via = conn.chains?.[0];
-        if (via !== node) throw new Error(`流量走了「${via ?? '未知'}」，不是「${node}」`);
+        if (via !== node) throw new PinMismatch(`流量走了「${via ?? '未知'}」，不是「${node}」`);
         return `经 ${via}`;
       }
       await new Promise((r) => setTimeout(r, 150));
@@ -81,6 +84,25 @@ export async function verifyPin({ upstreamPort, probeUrl, node, client, findTime
   } finally {
     sock.destroy();
   }
+}
+
+/**
+ * A route must be confirmed once before the gate opens. After that only a proven wrong
+ * route fails the check: a dead node gives no answer, and closing for that would only
+ * delay recovery. A wrong route shows up quickly, because direct dialing does not fail.
+ */
+function confirmOnce(run) {
+  let confirmed = false;
+  return async () => {
+    try {
+      const detail = await run();
+      confirmed = true;
+      return detail;
+    } catch (e) {
+      if (e instanceof PinMismatch || !confirmed) throw e;
+      return `暂时无法确认：${e.message}`;
+    }
+  };
 }
 
 /** Health checks for one node's gate. Each `run` returns a detail or throws why it failed. */
@@ -119,31 +141,32 @@ export function buildChecks(settings, client, node) {
       },
     });
   }
-  if (g.requireNode) {
-    checks.push({
-      id: 'node', label: '节点可用', intervalMs: g.delayIntervalSec * 1000, timeoutMs: g.delayTimeoutMs + 2000,
-      run: async () => {
-        const r = await client.delay(node, g.probeUrl, g.delayTimeoutMs);
-        if (typeof r.delay !== 'number' || r.delay <= 0) throw new Error('延迟测试失败');
-        return `${r.delay} ms`;
-      },
-    });
-  }
+  // Always runs so the page can say why an instance has no network. A dead node's listener
+  // returns 502 and never falls back to direct, so by default this does not hold the gate.
+  checks.push({
+    id: 'node', label: '节点可用', advisory: !g.requireNode, intervalMs: g.delayIntervalSec * 1000, timeoutMs: g.delayTimeoutMs + 2000,
+    run: async () => {
+      const r = await client.delay(node, g.probeUrl, g.delayTimeoutMs);
+      if (typeof r.delay !== 'number' || r.delay <= 0) throw new Error('延迟测试失败');
+      return `${r.delay} ms`;
+    },
+  });
   if (g.requirePin) {
     checks.push({
       id: 'pin', label: '流量钉死在该节点', intervalMs: g.pinIntervalSec * 1000, timeoutMs: 9000,
-      run: () => verifyPin({ upstreamPort: port, probeUrl: g.probeUrl, node, client }),
+      run: confirmOnce(() => verifyPin({ upstreamPort: port, probeUrl: g.probeUrl, node, client })),
     });
   }
   const expected = g.exitIps?.[node];
   if (expected) {
     checks.push({
       id: 'exit', label: '出口 IP', intervalMs: g.exitIntervalSec * 1000, timeoutMs: 15000,
-      run: async () => {
+      run: confirmOnce(async () => {
         const ip = await fetchExitIp(port, g.exitIpUrl);
-        if (ip !== expected) throw new Error(`实际 ${ip || '无响应'}，应为 ${expected}`);
+        if (!ip) throw new Error('无响应');
+        if (ip !== expected) throw new PinMismatch(`实际 ${ip}，应为 ${expected}`);
         return ip;
-      },
+      }),
     });
   }
   return checks;
@@ -224,7 +247,7 @@ export class GateMonitor extends EventEmitter {
 
   evaluate() {
     const t = this.now();
-    const failing = this.checks.filter((c) => !this.#healthy(c, t));
+    const failing = this.checks.filter((c) => !c.advisory && !this.#healthy(c, t));
     const allOk = this.checks.length > 0 && failing.length === 0;
     const next = decide(this.state, { allOk, locked: this.locked, now: t, stableMs: this.stableMs });
     if (next.open !== this.state.open) {
@@ -279,6 +302,7 @@ export class GateMonitor extends EventEmitter {
         id: c.id,
         label: c.label,
         ok: this.#healthy(c, t),
+        advisory: Boolean(c.advisory),
         pending: !c.result,
         detail: c.result?.detail ?? '等待结果',
         ageSec: c.result ? Math.round((t - c.result.at) / 1000) : null,

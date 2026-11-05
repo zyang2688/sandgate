@@ -107,7 +107,7 @@
           <h2>闸门放行条件</h2>
           <div class="stack tight">
             <label class="check"><input type="checkbox" name="requireTun"> TUN 正常运行</label>
-            <label class="check"><input type="checkbox" name="requireNode"> 节点延迟测试通过</label>
+            <label class="check"><input type="checkbox" name="requireNode"> 节点不可用时也关闭闸门（通常不用开：节点挂了本来就连不上，不会暴露 IP，节点恢复后连接也能马上恢复）</label>
             <label class="check"><input type="checkbox" name="requirePin"> 探测流量确实走了该节点</label>
           </div>
           <div class="grid">

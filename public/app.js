@@ -90,7 +90,7 @@ function renderGates({ locked, nodes }) {
   $('gates').innerHTML = entries.map(([node, g]) => {
     const waiting = !g.open && !g.locked && g.stableElapsedSec > 0 ? `（已稳定 ${g.stableElapsedSec}/${g.stableSec} 秒）` : '';
     const badge = g.open ? '<span class="badge run">已放行</span>' : '<span class="badge closed">已断开</span>';
-    const checks = g.checks.map((c) => checkRow(c.pending ? 'pending' : c.ok ? 'ok' : 'fail', c.label, c.detail)).join('');
+    const checks = g.checks.map((c) => checkRow(c.pending ? 'pending' : c.ok ? 'ok' : c.advisory ? 'warn' : 'fail', c.label, c.detail)).join('');
     return `<div class="gate">
       <div class="gate-name">${esc(node)} ${badge}</div>
       <div class="muted">${esc((g.open ? `已放行 ${duration(Date.now() - g.since)}` : g.reason) + waiting)}</div>

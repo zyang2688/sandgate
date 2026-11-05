@@ -10,7 +10,7 @@ import { AppManager, nscurlBlocked } from '../src/apps.js';
 import { detectVerge, listenerSnippet, ClashClient } from '../src/clash.js';
 import { Store, ValidationError, expandPath, mergeGateSettings, validateApp, DEFAULT_SETTINGS } from '../src/config.js';
 import { Sandgate } from '../src/daemon.js';
-import { GateManager, GateMonitor, decide, verifyPin } from '../src/gate.js';
+import { GateManager, GateMonitor, PinMismatch, decide, verifyPin } from '../src/gate.js';
 import { GatePort } from '../src/gateport.js';
 import { ConnectionGuard, findViolations, rulesFingerprint } from '../src/guard.js';
 import { PfPlanner, parseCidrList, parseClashConfig, resolveTargets } from '../src/pfplan.js';
@@ -307,7 +307,7 @@ describe('Clash integration (fake mihomo)', () => {
     const { upstream, controller } = fakeMihomo({ via: 'node-a' });
     const upstreamPort = await listen(upstream);
     const client = { connections: () => ({ connections: [] }) };
-    await assert.rejects(verifyPin({ upstreamPort, probeUrl: 'http://cp.example/x', node: 'node-a', client, findTimeoutMs: 300 }), /找不到探测连接/);
+    await assert.rejects(verifyPin({ upstreamPort, probeUrl: 'http://cp.example/x', node: 'node-a', client, findTimeoutMs: 300 }), (e) => /找不到探测连接/.test(e.message) && !(e instanceof PinMismatch));
     upstream.close();
     controller.close();
   });
@@ -501,13 +501,96 @@ describe('per-node gates', () => {
     return fn();
   };
 
-  test('a dead node closes only its own gate', async (t) => {
+  // A real mihomo returned 502 for a dead or unknown node, and never fell back to direct.
+  describe('a dead node', () => {
+    const setup = async (t, over = {}) => {
+      const state = { down: false };
+      const live = net.createServer((s) => s.on('error', () => {}));
+      const settings = {
+        ...structuredClone(DEFAULT_SETTINGS.gate), requireTun: false, requirePin: false, stableSec: 0.02, delayIntervalSec: 0.01, listeners: {}, ...over,
+      };
+      settings.listeners.a = await listen(live);
+      const client = { delay: async () => { if (state.down) throw new Error('down'); return { delay: 10 }; } };
+      const gates = new GateManager({ getSettings: () => settings, client });
+      const closed = [];
+      gates.on('close', (node) => closed.push(node));
+      t.after(() => { gates.stop(); live.close(); });
+      gates.sync(['a']);
+      gates.start();
+      assert.ok(await until(() => gates.isOpen('a')));
+      return { state, gates, closed };
+    };
+
+    test('keeps the gate open and reports it as a warning', async (t) => {
+      const { state, gates, closed } = await setup(t);
+      state.down = true;
+      const node = () => gates.snapshot().nodes.a.checks.find((c) => c.id === 'node');
+      assert.ok(await until(() => node().detail === 'down'));
+      await sleep(100);
+      assert.equal(gates.isOpen('a'), true);
+      assert.deepEqual(closed, []);
+      assert.equal(node().advisory, true);
+      assert.equal(node().ok, false);
+    });
+
+    test('closes the gate only when asked to', async (t) => {
+      const { state, gates } = await setup(t, { requireNode: true });
+      state.down = true;
+      assert.ok(await until(() => !gates.isOpen('a')));
+    });
+  });
+
+  describe('route confirmation', () => {
+    // Drives the real pin check through a fake mihomo whose answers can change.
+    const setup = async (t) => {
+      const state = { via: null };
+      const upstream = net.createServer((s) => {
+        s.on('error', () => {});
+        s.on('data', () => s.write('HTTP/1.1 200 Connection established\r\n\r\n'));
+      });
+      const port = await listen(upstream);
+      const settings = {
+        ...structuredClone(DEFAULT_SETTINGS.gate), requireTun: false, stableSec: 0.02, delayIntervalSec: 0.01, pinIntervalSec: 0.05, listeners: { a: port },
+      };
+      const sockets = [];
+      upstream.on('connection', (s) => sockets.push(s));
+      const client = {
+        delay: async () => ({ delay: 10 }),
+        connections: async () => ({
+          connections: state.via ? sockets.map((s) => ({ metadata: { sourcePort: String(s.remotePort) }, chains: [state.via] })) : [],
+        }),
+      };
+      const gates = new GateManager({ getSettings: () => settings, client });
+      t.after(() => { gates.stop(); upstream.close(); for (const s of sockets) s.destroy(); });
+      return { state, gates };
+    };
+
+    test('a route never confirmed keeps the gate closed', async (t) => {
+      const { gates } = await setup(t);
+      gates.sync(['a']);
+      gates.start();
+      await sleep(300);
+      assert.equal(gates.isOpen('a'), false);
+    });
+
+    test('a wrong route closes the gate', async (t) => {
+      const { state, gates } = await setup(t);
+      state.via = 'a';
+      gates.sync(['a']);
+      gates.start();
+      assert.ok(await until(() => gates.isOpen('a')));
+      state.via = 'DIRECT';
+      assert.ok(await until(() => !gates.isOpen('a')), 'gate stays open on a wrong route');
+    });
+  });
+
+  test('a failing basic check closes only its own gate', async (t) => {
     const down = new Set();
     const client = {
       delay: async (node) => { if (down.has(node)) throw new Error('down'); return { delay: 10 }; },
     };
     const settings = {
-      ...structuredClone(DEFAULT_SETTINGS.gate), requireTun: false, requirePin: false, stableSec: 0.02, delayIntervalSec: 0.01, listeners: {},
+      ...structuredClone(DEFAULT_SETTINGS.gate), requireNode: true, requireTun: false, requirePin: false, stableSec: 0.02, delayIntervalSec: 0.01, listeners: {},
     };
     const live = net.createServer((s) => s.on('error', () => {}));
     settings.listeners.a = await listen(live);
