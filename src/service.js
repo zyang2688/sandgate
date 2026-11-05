@@ -38,7 +38,7 @@ ${envXml}
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>ProcessType</key><string>Background</string>
+  <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>${xml(logFile)}</string>
   <key>StandardErrorPath</key><string>${xml(logFile)}</string>
 </dict></plist>

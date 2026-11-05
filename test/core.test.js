@@ -1533,6 +1533,14 @@ describe('real sandbox-exec', { skip: canSandbox ? false : 'sandbox-exec unavail
   });
 });
 
+describe('service priority', () => {
+  // Instances inherit the job's class. Background held Chrome at 12 fps, against 122 with Interactive.
+  test('runs as Interactive, since instances inherit its class', () => {
+    const source = fs.readFileSync(path.join(import.meta.dirname, '../src/service.js'), 'utf8');
+    assert.match(source, /<key>ProcessType<\/key><string>Interactive<\/string>/);
+  });
+});
+
 describe('leak self-test', () => {
   test('nscurl counts as blocked only with a failure message, since it always exits 0', () => {
     const denied = 'Load failed with error: Error Domain=NSPOSIXErrorDomain Code=1 "Operation not permitted"';
