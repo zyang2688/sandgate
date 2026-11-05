@@ -488,11 +488,15 @@ export class Sandgate {
     }
     if (this.background) {
       try {
-        const { missing, generatedAt } = this.clashSync.generatedStatus();
+        const { state, generatedAt } = this.clashSync.generatedStatus();
         const when = new Date(generatedAt).toLocaleString('zh-CN', { hour12: false });
-        add('clash-generated', 'Clash Verge 生成的配置', missing.length ? 'warn' : 'ok', missing.length
-          ? `${when} 生成的配置里还没有 ${missing.join('、')}。它现在靠接口加载；如果更新订阅后仍缺少，说明脚本扩展没有生效。`
-          : `${when} 生成的配置已包含 SandGate 的内容，脚本扩展有效。`);
+        const [status, detail] = {
+          ok: ['ok', `${when} 生成的配置已包含 SandGate 的内容，脚本扩展有效。`],
+          pending: ['ok', `网络配置已生效，并已写入脚本扩展。Clash Verge 上次生成配置是 ${when}，下次生成时会带上。`],
+          'no-script': ['warn', '脚本扩展里没有当前的网络配置，Clash Verge 下次生成配置后它们会失效。到「网络配置」页点“同步到 Clash”。'],
+          broken: ['warn', `Clash Verge 在 ${when} 用当前脚本扩展生成了配置，里面却没有 SandGate 的内容，脚本扩展可能没有生效。`],
+        }[state];
+        add('clash-generated', 'Clash Verge 生成的配置', status, detail);
       } catch (e) {
         add('clash-generated', 'Clash Verge 生成的配置', 'warn', `无法读取：${e.message}`);
       }

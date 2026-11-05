@@ -1905,13 +1905,55 @@ tun:
       assert.equal(payloads.length, 1);
     });
 
-    test('tells whether Clash Verge\'s generated config has the managed entries', () => {
-      const { sync, store } = setup();
-      assert.deepEqual(sync.generatedStatus().missing, ['sgp-abc']);
-      const file = path.join(sync.vergeDir, 'clash-verge.yaml');
-      fs.writeFileSync(file, `${fs.readFileSync(file, 'utf8')}listeners:\n- name: sgp-abc\n  type: mixed\n  port: 17990\n  rule: sgp-abc\n`);
-      assert.deepEqual(sync.generatedStatus().missing, []);
-      assert.equal(store.data.netProfiles.length, 1);
+    describe('Clash Verge\'s generated config', () => {
+      const prepared = async () => {
+        const r = setup();
+        await r.sync.apply(); // writes the managed block into the script
+        const generated = path.join(r.sync.vergeDir, 'clash-verge.yaml');
+        const at = (file, seconds) => fs.utimesSync(file, seconds, seconds);
+        return { ...r, generated, at };
+      };
+
+      test('waiting: the script is newer, so the next generation brings them', async () => {
+        const { sync, generated, scriptFile, at } = await prepared();
+        at(generated, 1000);
+        at(scriptFile, 2000);
+        const s = sync.generatedStatus();
+        assert.equal(s.state, 'pending');
+        assert.deepEqual(s.missing, ['sgp-abc']);
+      });
+
+      test('broken: generated from this script, and still missing', async () => {
+        const { sync, generated, scriptFile, at } = await prepared();
+        at(scriptFile, 1000);
+        at(generated, 2000);
+        assert.equal(sync.generatedStatus().state, 'broken');
+      });
+
+      test('no script: the next generation would drop them, however new the script is', async () => {
+        const { sync, generated, scriptFile, at } = await prepared();
+        fs.writeFileSync(scriptFile, 'function main(config) {\n  return config;\n}\n');
+        at(generated, 1000);
+        at(scriptFile, 2000);
+        assert.equal(sync.generatedStatus().state, 'no-script');
+      });
+
+      test('a missing script extension counts as no script', async () => {
+        const { sync, generated } = await prepared();
+        fs.writeFileSync(path.join(sync.vergeDir, 'profiles.yaml'), 'current: R\nitems:\n- uid: R\n  file: R.yaml\n');
+        assert.equal(fs.existsSync(generated), true);
+        assert.equal(sync.generatedStatus().state, 'no-script');
+      });
+
+      test('ok: present, whatever the times say', async () => {
+        const { sync, generated, scriptFile, at } = await prepared();
+        fs.writeFileSync(generated, `${fs.readFileSync(generated, 'utf8')}listeners:\n- name: sgp-abc\n  type: mixed\n  port: 17990\n  rule: sgp-abc\n`);
+        at(generated, 1000);
+        at(scriptFile, 2000);
+        const s = sync.generatedStatus();
+        assert.equal(s.state, 'ok');
+        assert.deepEqual(s.missing, []);
+      });
     });
 
     test('does nothing when disabled, so tests never touch a real Clash', async () => {

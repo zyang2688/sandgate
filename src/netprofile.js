@@ -276,14 +276,27 @@ export class ClashSync {
 
   /**
    * Whether Clash Verge's last generated config carries the managed entries. Only Clash
-   * Verge can regenerate it, so this is how a broken script extension shows up.
+   * Verge can regenerate it, so this is how a broken script extension shows up. Entries
+   * missing from a config older than the script are just waiting for the next generation.
+   *   ok: present. pending: waiting. no-script: the script lacks them, so the next
+   *   generation will drop them. broken: generated from this script and still missing.
    */
   generatedStatus(spec = buildSpec(this.store.data)) {
-    const text = fs.readFileSync(path.join(this.vergeDir, 'clash-verge.yaml'), 'utf8');
-    const { items } = listItems(sectionLines(text, 'listeners'));
+    const file = path.join(this.vergeDir, 'clash-verge.yaml');
+    const { items } = listItems(sectionLines(fs.readFileSync(file, 'utf8'), 'listeners'));
     const names = new Set(items.map(nameOf));
     const missing = spec.listeners.map((l) => l.name).filter((n) => !names.has(n));
-    return { missing, generatedAt: fs.statSync(path.join(this.vergeDir, 'clash-verge.yaml')).mtimeMs };
+    const generatedAt = fs.statSync(file).mtimeMs;
+    if (!missing.length) return { state: 'ok', missing, generatedAt };
+    let script;
+    try {
+      script = this.#scriptPath();
+      const text = fs.readFileSync(script, 'utf8');
+      if (withManagedBlock(text, spec) !== text) return { state: 'no-script', missing, generatedAt };
+    } catch {
+      return { state: 'no-script', missing, generatedAt };
+    }
+    return { state: fs.statSync(script).mtimeMs > generatedAt ? 'pending' : 'broken', missing, generatedAt };
   }
 
   async #apply() {
