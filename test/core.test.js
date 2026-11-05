@@ -1100,7 +1100,7 @@ SYNC_SECONDS=0.2
       assert.equal(loads(r.calls()).length, 1, 'a list change swaps tables instead of reloading rules');
 
       assert.equal(await stop(child), 0);
-      assert.equal(r.calls().filter((c) => c.includes('-F') || c.startsWith('-X')).length, 0, 'stopping never flushes or releases pf');
+      assert.equal(r.calls().filter((c) => /(^| )-[FX]( |$)/.test(c)).length, 0, 'stopping never flushes or releases pf');
       assert.equal(fs.readFileSync(path.join(r.state, 'failed'), 'utf8'), '0\n', 'a clean stop does not count as a failed boot');
     });
 

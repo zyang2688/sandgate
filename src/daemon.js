@@ -333,8 +333,6 @@ export class Sandgate {
     }
     if (gate.defaultNode && knownNodes) {
       add('default-node', '默认分流节点', knownNodes.includes(gate.defaultNode) ? 'ok' : 'fail', gate.defaultNode);
-    } else if (!gate.defaultNode) {
-      add('default-node', '默认分流节点', 'warn', '未设置，连接守卫不会检查默认分流的流量');
     }
 
     for (const [node, port] of Object.entries(this.#activeListeners())) {

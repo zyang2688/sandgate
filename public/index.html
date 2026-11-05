@@ -86,8 +86,9 @@
             </label>
             <label>国内 IP 列表（相对 Clash Verge 目录）<input name="pfCnList" spellcheck="false"></label>
             <label>检测直连用的网卡 <input name="probeIface" spellcheck="false"></label>
-            <label>默认分流允许的节点（留空不检查）<input name="defaultNode" list="node-list" spellcheck="false"></label>
+            <label>限定分流只走一个节点（可选）<input name="defaultNode" list="node-list" spellcheck="false"></label>
           </div>
+          <p class="muted">「限定分流只走一个节点」通常留空，节点范围已由上面的放行列表限制。填写后，按 Clash 规则分流的连接只要不走这个节点也不走直连，约 2 秒内就会被断开，其他放行节点和同组节点也一样，所以放行多个节点时不要填。它不影响沙盒实例。</p>
           <ul id="pf-plan" class="checks"></ul>
           <p class="muted">SandGate 运行时会每 15 秒按配置重算放行列表，pf 每 30 秒检查一次，列表变化时才更新。不在放行列表里的节点连不上，不会切过去。</p>
         </section>
