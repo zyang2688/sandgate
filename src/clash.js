@@ -16,19 +16,32 @@ export class ClashClient {
     return this.cfg.type === 'unix' ? Boolean(this.cfg.socketPath) : Boolean(this.cfg.port);
   }
 
-  request(pathname, { timeout = 3000, method = 'GET' } = {}) {
+  request(pathname, { timeout = 3000, method = 'GET', body } = {}) {
     const { type, host, port, socketPath, secret } = this.cfg;
     const target = type === 'unix' ? { socketPath } : { host, port };
     return new Promise((resolve, reject) => {
       const req = http.request(
-        { ...target, path: pathname, method, timeout, headers: secret ? { Authorization: `Bearer ${secret}` } : {} },
+        {
+          ...target,
+          path: pathname,
+          method,
+          timeout,
+          headers: {
+            ...(secret ? { Authorization: `Bearer ${secret}` } : {}),
+            ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          },
+        },
         (res) => {
           let body = '';
           res.setEncoding('utf8');
           res.on('data', (d) => { body += d; });
           res.on('end', () => {
             if (res.statusCode === 401) return reject(new ClashError('控制接口密钥错误'));
-            if (res.statusCode >= 400) return reject(new ClashError(`控制接口返回 HTTP ${res.statusCode}`));
+            if (res.statusCode >= 400) {
+              let detail = '';
+              try { detail = JSON.parse(body).message ?? ''; } catch { /* not JSON */ }
+              return reject(new ClashError(`控制接口返回 HTTP ${res.statusCode}${detail ? `：${String(detail).slice(0, 200)}` : ''}`));
+            }
             if (res.statusCode === 204 || !body) return resolve({});
             try { resolve(JSON.parse(body)); } catch { reject(new ClashError('控制接口返回了非 JSON 内容')); }
           });
@@ -37,8 +50,13 @@ export class ClashClient {
       );
       req.on('timeout', () => req.destroy(new ClashError('控制接口超时')));
       req.on('error', (e) => reject(e instanceof ClashError ? e : new ClashError(e.message)));
-      req.end();
+      req.end(body === undefined ? undefined : JSON.stringify(body));
     });
+  }
+
+  /** Replaces the running config. mihomo parses first, so a bad config changes nothing. */
+  reload(payload) {
+    return this.request('/configs?force=true', { method: 'PUT', body: { payload }, timeout: 20000 });
   }
 
   version() { return this.request('/version'); }
@@ -91,15 +109,4 @@ export function detectVerge(home = os.homedir()) {
     ? { type: 'tcp', host: m[1], port: Number(m[2]), socketPath, secret }
     : { type: 'unix', host: '127.0.0.1', port: 9097, socketPath, secret };
   return { controller, mixedPort, socketExists: Boolean(socketPath) && fs.existsSync(socketPath) };
-}
-
-/** One listener per node: its traffic skips the rules and can only use that node. */
-export function listenerSnippet(listeners) {
-  const entries = Object.entries(listeners);
-  if (!entries.length) return '# 添加一个经节点联网的沙盒应用后，这里会生成配置\n';
-  const lines = ['listeners:'];
-  for (const [node, port] of entries) {
-    lines.push(`  - name: sandgate-${port}`, '    type: mixed', '    listen: 127.0.0.1', `    port: ${port}`, `    proxy: ${JSON.stringify(node)}`);
-  }
-  return lines.join('\n') + '\n';
 }

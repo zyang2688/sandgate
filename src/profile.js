@@ -49,14 +49,22 @@ const MDNS_SOCKET = '/private/var/run/mDNSResponder';
  * load-bearing: broad denies first, narrow allows next, protected paths last.
  */
 export function buildProfile(app, { port, sandgateDir, instancesDir = '', instanceHome = '', controllerSocket = '', home = os.homedir(), tempDir = os.tmpdir() }) {
-  const lines = ['(version 1)', '(allow default)', '', ';; network: deny everything, including DNS', '(deny network*)'];
+  // Instances following rules reach the network through TUN like any program, so git and
+  // ssh keep working. Their exit is chosen by Clash, not enforced here.
+  const pinned = !['open', 'rules'].includes(app.network);
+  const lines = ['(version 1)', '(allow default)'];
+  if (pinned) lines.push('', ';; network: deny everything, including DNS', '(deny network*)');
 
   if (app.network === 'gate') {
     if (!Number.isInteger(port)) throw new Error('gate mode needs a port');
     lines.push(`(allow network-outbound (remote ip ${sbString(`localhost:${port}`)}))`);
   }
 
-  if (app.allowUnixSockets) {
+  if (!pinned && controllerSocket) {
+    lines.push('', ';; the Clash controller stays blocked', `(deny network* (literal ${sbString(canonical(controllerSocket))}))`);
+  }
+
+  if (pinned && app.allowUnixSockets) {
     lines.push('', ';; unix sockets for local IPC; DNS and the Clash controller stay blocked');
     lines.push('(allow network* (local unix-socket))', '(allow network-outbound (remote unix-socket))');
     lines.push(`(deny network-outbound (literal ${sbString(MDNS_SOCKET)}))`);
@@ -129,7 +137,7 @@ export function buildEnv(app, port, base = process.env, instanceHome = '') {
   for (const k of Object.keys(env)) {
     if (/^(https?_proxy|all_proxy|ftp_proxy|no_proxy)$/i.test(k)) delete env[k];
   }
-  if (app.network === 'gate') {
+  if (['gate', 'rules'].includes(app.network)) {
     const http = `http://127.0.0.1:${port}`;
     const socks = `socks5h://127.0.0.1:${port}`;
     Object.assign(env, { HTTP_PROXY: http, HTTPS_PROXY: http, ALL_PROXY: socks, http_proxy: http, https_proxy: http, all_proxy: socks });

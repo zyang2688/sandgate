@@ -46,6 +46,7 @@ function showTab(name) {
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
   stopPolling();
   if (name === 'overview') { loadNodeList(); refresh(); pollTimer = setInterval(refresh, 1500); }
+  if (name === 'network') { loadNodeList(); loadNetProfiles().catch(handleError); }
   if (name === 'settings') loadSettings().catch(handleError);
   if (name === 'preflight') loadPreflight().catch(handleError);
 }
@@ -81,6 +82,10 @@ function renderProtection(p, guard) {
   $('mode-alert').textContent = guard.modeWarning ?? '';
 }
 
+let netProfiles = [];
+const FOLLOW_NOTE = '和普通程序一样按 Clash 规则分流，git、SSH、内网都正常。实例只隔离文件，走哪个出口由 Clash 决定。';
+const gateLabel = (key) => netProfiles.find((p) => `sgp-${p.id}` === key)?.name ?? key;
+
 function renderGates({ locked, nodes }) {
   $('lock-btn').textContent = locked ? '解除锁定' : '断开所有实例';
   $('lock-btn').dataset.locked = locked ? '1' : '';
@@ -94,7 +99,7 @@ function renderGates({ locked, nodes }) {
     const badge = g.open ? '<span class="badge run">已放行</span>' : '<span class="badge closed">已断开</span>';
     const checks = g.checks.map((c) => checkRow(c.pending ? 'pending' : c.ok ? 'ok' : c.advisory ? 'warn' : 'fail', c.label, c.detail)).join('');
     return `<div class="gate">
-      <div class="gate-name">${esc(node)} ${badge}</div>
+      <div class="gate-name">${esc(gateLabel(node))} ${badge}</div>
       <div class="muted">${esc((g.open ? `已放行 ${duration(Date.now() - g.since)}` : g.reason) + waiting)}</div>
       <ul class="checks">${checks}</ul>
     </div>`;
@@ -124,12 +129,12 @@ function renderApps(apps) {
     return;
   }
   $('apps').innerHTML = apps.map((a) => {
-    const net = a.network === 'gate'
+    const net = a.port
       ? `闸门端口 ${a.port} · ${a.conns} 个连接 · ↑${bytes(a.stats.up)} ↓${bytes(a.stats.down)} · 拒绝 ${a.stats.refused}`
-      : '完全禁网';
+      : a.network === 'open' ? '跟随 Clash 规则' : '完全禁网';
     const exit = !a.running && a.lastExit ? ` · 上次退出码 ${a.lastExit.code ?? a.lastExit.signal}` : '';
-    const node = a.network === 'gate'
-      ? `<span class="badge ${a.gateOpen ? 'run' : 'closed'}">${esc(a.node)}</span>`
+    const node = a.port
+      ? `<span class="badge ${a.gateOpen ? 'run' : 'closed'}">${esc(netProfiles.find((p) => p.id === a.netProfile)?.name ?? a.node)}</span>`
       : '';
     return `<div class="app">
       <div class="app-main">
@@ -158,6 +163,7 @@ async function refresh() {
   refreshing = true;
   try {
     const s = await api('state');
+    netProfiles = s.netProfiles;
     renderProtection(s.protection, s.guard);
     renderGates(s.gates);
     if (!actionInFlight) renderApps(s.apps);
@@ -257,11 +263,11 @@ $('output-close').addEventListener('click', () => $('output-dialog').close());
 
 const PRESETS = {
   cli: {
-    note: '程序需读取 HTTP_PROXY / ALL_PROXY。不读取的程序会一直断网，不会泄漏。',
+    note: '选“跟随 Clash”时程序不用任何设置。选其他配置时，程序需读取 HTTP_PROXY / ALL_PROXY。',
     apply(f) { f.blockBrokers.checked = true; f.allowUnixSockets.checked = false; },
   },
   chromium: {
-    note: '已加入 --proxy-server 和独立的 --user-data-dir，可以多开。共用数据模式也需要这个目录，否则窗口会并入已在运行的 Chrome，不走选定的节点。Chromium 自带沙盒不能嵌套，需要 --no-sandbox，渲染进程的隔离会减弱。实例不能用钥匙串，所以加了 --use-mock-keychain，保存的密码和 Cookie 不受钥匙串保护。',
+    note: '已加入独立的 --user-data-dir，可以多开；选“跟随 Clash”以外的配置时还会用 --proxy-server。共用数据模式也需要这个目录，否则窗口会并入已在运行的 Chrome，不走选定的节点。Chromium 自带沙盒不能嵌套，需要 --no-sandbox，渲染进程的隔离会减弱。实例不能用钥匙串，所以加了 --use-mock-keychain，保存的密码和 Cookie 不受钥匙串保护。',
     apply(f) {
       f.blockBrokers.checked = false;
       f.allowUnixSockets.checked = true;
@@ -272,10 +278,23 @@ const PRESETS = {
 
 let editingId = null;
 
-function syncNetworkField() {
+function fillNetProfileSelect() {
+  const options = [
+    `<option value="follow">跟随 Clash 规则</option>`,
+    ...netProfiles.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`),
+    `<option value="none">完全禁网</option>`,
+  ];
+  $('app-form').netProfile.innerHTML = options.join('');
+}
+
+function syncNetworkField({ takeTimezone = false } = {}) {
   const f = $('app-form');
-  $('node-field').hidden = f.network.value !== 'gate';
-  f.node.required = f.network.value === 'gate';
+  const p = netProfiles.find((x) => x.id === f.netProfile.value);
+  $('net-profile-note').textContent = f.netProfile.value === 'follow' ? FOLLOW_NOTE
+    : f.netProfile.value === 'none' ? '程序完全不能联网。'
+      : p?.mode === 'node' ? `所有流量都走 ${p.node}，由系统强制，不支持代理的程序（包括 SSH）连不上。`
+        : '程序经专用端口进入这份规则，需要支持代理。不认代理的程序（如 SSH）走 Clash 的通用规则。';
+  if (takeTimezone && p?.timezone) f.timezone.value = p.timezone;
 }
 
 const DATA_MODE_NOTES = {
@@ -295,8 +314,7 @@ function fillAppForm(f, app) {
   f.args.value = app.args.join('\n');
   f.cwd.value = app.cwd;
   f.env.value = Object.entries(app.env).map(([k, v]) => `${k}=${v}`).join('\n');
-  f.network.value = app.network;
-  f.node.value = app.node;
+  f.netProfile.value = app.netProfile || 'follow';
   f.timezone.value = app.timezone ?? '';
   f.dataMode.value = app.isolateHome ? 'clone' : 'shared';
   f.shared.value = (app.shared ?? []).join('\n');
@@ -311,15 +329,14 @@ function openAppDialog(app, { duplicate = false } = {}) {
   editingId = app && !duplicate ? app.id : null;
   const f = $('app-form');
   f.reset();
+  fillNetProfileSelect();
   $('app-error').textContent = '';
   $('preset-field').hidden = Boolean(app);
   $('preset-note').textContent = '';
   if (app) {
     fillAppForm(f, app);
     if (duplicate) {
-      // A second copy must not share a data directory, and usually wants another node.
       f.name.value = `${app.name} 2`;
-      f.node.value = '';
       $('app-dialog-title').textContent = `再开一个：${app.name}`;
     } else {
       $('app-dialog-title').textContent = `编辑：${app.name}${app.running ? '（重启后生效）' : ''}`;
@@ -343,7 +360,7 @@ function applyPreset() {
 }
 
 $('app-form').preset.addEventListener('change', applyPreset);
-$('app-form').network.addEventListener('change', syncNetworkField);
+$('app-form').netProfile.addEventListener('change', () => syncNetworkField({ takeTimezone: true }));
 $('app-form').dataMode.addEventListener('change', syncDataMode);
 $('add-app').addEventListener('click', () => openAppDialog());
 $('app-cancel').addEventListener('click', () => $('app-dialog').close());
@@ -363,8 +380,7 @@ $('app-form').addEventListener('submit', async (e) => {
     args: lines(f.args.value),
     cwd: f.cwd.value.trim(),
     env,
-    network: f.network.value,
-    node: f.node.value,
+    netProfile: f.netProfile.value,
     timezone: f.timezone.value.trim(),
     isolateHome: f.dataMode.value === 'clone',
     shared: lines(f.shared.value),
@@ -400,7 +416,7 @@ async function loadNodeList() {
 }
 
 function renderExitIps(g) {
-  const nodes = Object.keys(g.listeners);
+  const nodes = Object.keys(g.listeners).filter((n) => !n.startsWith('sgp-'));
   $('exit-ips').innerHTML = nodes.length
     ? `<div class="muted">期望出口 IP（留空不检查；填写后会定期请求下方的查询地址）</div>${nodes.map((n) => `
       <div class="exit-row">
@@ -411,7 +427,7 @@ function renderExitIps(g) {
     : '';
 }
 
-function fillSettings({ gate: g, listenerSnippet, pfScript }) {
+function fillSettings({ gate: g, pfScript }) {
   const f = $('settings-form');
   f.ctype.value = g.controller.type;
   f.cport.value = g.controller.port;
@@ -433,7 +449,6 @@ function fillSettings({ gate: g, listenerSnippet, pfScript }) {
   f.delayTo.value = g.delayTimeoutMs;
   f.probeUrl.value = g.probeUrl;
   f.exitUrl.value = g.exitIpUrl;
-  $('snippet').textContent = listenerSnippet;
   $('pf-commands').textContent = [
     '# 安装：立即生效，之后每次开机自动加载',
     `sudo bash "${pfScript}" install`,
@@ -530,10 +545,138 @@ $('exit-ips').addEventListener('click', async (e) => {
   }
 });
 
-$('copy-snippet').addEventListener('click', async (e) => {
-  await navigator.clipboard.writeText($('snippet').textContent);
-  e.target.textContent = '已复制';
-  setTimeout(() => { e.target.textContent = '复制'; }, 1500);
+// ---- Network profiles ----------------------------------------------------
+
+let netEditingId = null;
+const NET_MODE_NOTES = {
+  custom: '以 Clash 当前的规则为基础，只替换你选的出口。规则随订阅更新。直连规则仍走真实 IP。',
+  node: '所有流量都走这个节点，由系统强制，不会走错出口。不支持代理的程序（包括 SSH）连不上。',
+};
+
+function renderNetProfiles(state) {
+  netProfiles = state.netProfiles;
+  const used = new Map();
+  for (const a of state.apps) used.set(a.netProfile, [...(used.get(a.netProfile) ?? []), a.name]);
+  const row = (p) => {
+    const exits = Object.entries(p.exits ?? {}).map(([g, t]) => `${g} → ${t}`);
+    const summary = p.mode === 'node' ? `全部走 ${p.node}` : [...exits, ...(p.extraRules?.length ? [`额外规则 ${p.extraRules.length} 条`] : [])].join('，');
+    const users = used.get(p.id) ?? [];
+    return `<div class="app">
+      <div class="app-main">
+        <div class="app-name">${esc(p.name)}</div>
+        <div class="muted">${esc(summary)}</div>
+        <div class="muted">${users.length ? `使用中：${esc(users.join('、'))}` : '没有实例在用'}${p.timezone ? ` · 默认时区 ${esc(p.timezone)}` : ''}</div>
+      </div>
+      <div class="actions">
+        <button class="btn" data-net="edit" data-id="${esc(p.id)}">编辑</button>
+        <button class="btn" data-net="delete" data-id="${esc(p.id)}" ${users.length ? 'disabled' : ''}>删除</button>
+      </div>
+    </div>`;
+  };
+  const follow = used.get('follow') ?? [];
+  $('net-list').innerHTML = `<div class="app"><div class="app-main">
+      <div class="app-name">跟随 Clash 规则 <span class="badge">默认</span></div>
+      <div class="muted">${esc(FOLLOW_NOTE)}</div>
+      <div class="muted">${follow.length ? `使用中：${esc(follow.join('、'))}` : '没有实例在用'}</div>
+    </div></div>${netProfiles.map(row).join('')}`;
+  renderSync(state.sync);
+}
+
+function renderSync(sync) {
+  const when = sync.at ? `（${new Date(sync.at).toLocaleTimeString()}）` : '';
+  $('net-sync-state').textContent = `${sync.message}${when}`;
+}
+
+async function loadNetProfiles() {
+  renderNetProfiles(await api('state'));
+}
+
+function syncNetMode() {
+  const f = $('net-form');
+  $('net-mode-note').textContent = NET_MODE_NOTES[f.mode.value];
+  $('net-node-field').hidden = f.mode.value !== 'node';
+  f.node.required = f.mode.value === 'node';
+  $('net-custom').hidden = f.mode.value !== 'custom';
+}
+
+async function openNetDialog(profile) {
+  netEditingId = profile?.id ?? null;
+  const f = $('net-form');
+  f.reset();
+  $('net-error').textContent = '';
+  $('net-dialog-title').textContent = profile ? `编辑：${profile.name}` : '新建配置';
+  f.mode.value = profile?.mode ?? 'custom';
+  f.name.value = profile?.name ?? '';
+  f.node.value = profile?.node ?? '';
+  f.extraRules.value = (profile?.extraRules ?? []).join('\n');
+  f.timezone.value = profile?.timezone ?? 'America/Los_Angeles';
+  let options = { policies: [], targets: [] };
+  try {
+    options = await api('netprofiles/options');
+    $('net-exits-note').textContent = options.policies.length ? '' : 'Clash 规则里没有用到策略组。';
+  } catch (err) {
+    if (err instanceof AuthError) return showLogin();
+    $('net-exits-note').textContent = `读取 Clash 失败：${err.message}`;
+  }
+  $('target-list').innerHTML = options.targets.map((t) => `<option value="${esc(t)}"></option>`).join('');
+  const names = [...new Set([...options.policies.map((p) => p.name), ...Object.keys(profile?.exits ?? {})])];
+  const count = new Map(options.policies.map((p) => [p.name, p.count]));
+  $('net-exits').innerHTML = names.map((n) => `<div class="exit-row">
+      <span>${esc(n)}${count.has(n) ? `（${count.get(n)} 条规则）` : '（Clash 规则里已没有）'}</span>
+      <input data-exit-group="${esc(n)}" list="target-list" value="${esc(profile?.exits?.[n] ?? '')}" spellcheck="false" aria-label="${esc(n)} 的出口">
+    </div>`).join('');
+  syncNetMode();
+  $('net-dialog').showModal();
+}
+
+$('add-net').addEventListener('click', () => openNetDialog());
+$('net-cancel').addEventListener('click', () => $('net-dialog').close());
+$('net-form').mode.addEventListener('change', syncNetMode);
+
+$('net-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const exits = {};
+  document.querySelectorAll('[data-exit-group]').forEach((i) => { exits[i.dataset.exitGroup] = i.value; });
+  const body = { name: f.name.value, mode: f.mode.value, node: f.node.value, exits, extraRules: lines(f.extraRules.value), timezone: f.timezone.value.trim() };
+  try {
+    const r = netEditingId
+      ? await api(`netprofiles/${netEditingId}`, { method: 'PUT', body })
+      : await api('netprofiles', { method: 'POST', body });
+    $('net-dialog').close();
+    await loadNetProfiles();
+    renderSync(r.sync);
+  } catch (err) {
+    if (err instanceof AuthError) return showLogin();
+    $('net-error').textContent = err.message;
+  }
+});
+
+$('net-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-net]');
+  if (!btn) return;
+  const profile = netProfiles.find((p) => p.id === btn.dataset.id);
+  try {
+    if (btn.dataset.net === 'edit') return await openNetDialog(profile);
+    if (btn.textContent !== '确认删除') { btn.textContent = '确认删除'; return undefined; }
+    const r = await api(`netprofiles/${profile.id}`, { method: 'DELETE', body: {} });
+    await loadNetProfiles();
+    renderSync(r.sync);
+  } catch (err) {
+    if (err instanceof AuthError) return showLogin();
+    $('net-sync-state').textContent = err.message;
+  }
+  return undefined;
+});
+
+$('net-sync').addEventListener('click', async () => {
+  $('net-sync-state').textContent = '同步中…';
+  try { renderSync(await api('netprofiles/sync', { method: 'POST' })); }
+  catch (err) {
+    if (err instanceof AuthError) return showLogin();
+    $('net-sync-state').textContent = err.message;
+  }
+  return undefined;
 });
 
 // ---- Preflight -----------------------------------------------------------

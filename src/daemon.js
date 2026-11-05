@@ -6,10 +6,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { AppManager } from './apps.js';
-import { ClashClient, ClashError, detectVerge, listenerSnippet } from './clash.js';
+import { ClashClient, ClashError, detectVerge } from './clash.js';
 import { Store, ValidationError, mergeGateSettings, validateApp } from './config.js';
 import { GateManager, defaultRouteInterface, fetchExitIp, tcpProbe } from './gate.js';
 import { ConnectionGuard, ProtectionProbe, ipv6Check, modeWarning } from './guard.js';
+import { ClashSync, FOLLOW, NO_NETWORK, isRuleKey, ruleKey, validateNetProfile } from './netprofile.js';
 import { PfPlanner } from './pfplan.js';
 
 const exec = promisify(execFile);
@@ -58,6 +59,7 @@ export class Sandgate {
     });
     this.protection = new ProtectionProbe({ getSettings });
     this.pfPlanner = new PfPlanner({ store: this.store, getSettings });
+    this.clashSync = new ClashSync({ store: this.store, client: this.client, enabled: background });
     this.session = crypto.randomBytes(24).toString('base64url');
     this.server = http.createServer((req, res) => this.#handle(req, res));
   }
@@ -78,6 +80,7 @@ export class Sandgate {
       this.guard.start();
       this.protection.start();
       this.pfPlanner.start();
+      this.#syncOnStart();
     }
     return { url: `http://127.0.0.1:${this.port}/#token=${this.store.token}` };
   }
@@ -90,6 +93,20 @@ export class Sandgate {
     await this.apps.stopAll();
     this.server.closeAllConnections();
     await new Promise((resolve) => this.server.close(resolve));
+  }
+
+  /** Listeners can be missing after a profile switch in Clash Verge, so check on every start. */
+  async #syncOnStart() {
+    const ports = Object.keys(this.store.data.gate.listeners).length ? Object.values(this.store.data.gate.listeners) : [];
+    const open = await Promise.all(ports.map((p) => tcpProbe(p).then(() => true, () => false)));
+    if (open.includes(false)) return this.clashSync.apply();
+    try {
+      this.clashSync.writeScript();
+      this.clashSync.status = { state: 'ok', message: '已同步到 Clash', at: Date.now() };
+    } catch (e) {
+      this.clashSync.status = { state: 'warn', message: `脚本扩展没有更新：${e.message}`, at: Date.now() };
+    }
+    return this.clashSync.status;
   }
 
   #applyGateSettings() {
@@ -190,6 +207,17 @@ export class Sandgate {
       case 'POST /api/gate/exit-ip': return this.#exitIp(await this.#body(req));
       case 'POST /api/guard/accept-rules': this.guard.acceptRules(); return this.guard.status;
       case 'POST /api/apps': return this.#createApp(await this.#body(req));
+      case 'GET /api/netprofiles/options': return this.#netOptions();
+      case 'POST /api/netprofiles': return this.#createNetProfile(await this.#body(req));
+      case 'POST /api/netprofiles/sync': return this.clashSync.apply();
+    }
+    const np = url.pathname.match(/^\/api\/netprofiles\/([0-9a-f]+)$/);
+    if (np) {
+      const profile = this.store.data.netProfiles.find((p) => p.id === np[1]);
+      if (!profile) throw new HttpError(404, '配置不存在');
+      if (req.method === 'PUT') return this.#updateNetProfile(profile, await this.#body(req));
+      if (req.method === 'DELETE') return this.#deleteNetProfile(profile);
+      throw new HttpError(405, '方法不允许');
     }
     const m = url.pathname.match(/^\/api\/apps\/([0-9a-f]+)(?:\/(start|stop|verify|logs|profile))?$/);
     if (!m) throw new HttpError(404, '未找到');
@@ -219,11 +247,12 @@ export class Sandgate {
       guard: this.guard.status,
       protection: this.protection.status,
       pf: this.pfPlanner.status,
+      netProfiles: this.store.data.netProfiles,
+      sync: this.clashSync.status,
       apps: this.store.data.apps.map((a) => this.apps.snapshot(a)),
     };
   }
 
-  /** The snippet covers nodes in use, since a listener can only be added by the user. */
   #activeListeners() {
     const { listeners } = this.store.data.gate;
     return Object.fromEntries(this.store.usedNodes().map((n) => [n, listeners[n]]));
@@ -235,7 +264,6 @@ export class Sandgate {
     const gate = { ...rest, controller: { ...controller, hasSecret: Boolean(secret) } };
     return {
       gate,
-      listenerSnippet: listenerSnippet(this.#activeListeners()),
       pfScript: path.join(ROOT, 'scripts/sandgate-pf.sh'),
     };
   }
@@ -272,7 +300,7 @@ export class Sandgate {
 
   /** Assigns ports for a validated instance; its listener must exist before saving. */
   #assignPorts(app) {
-    if (app.network === 'gate') {
+    if (['gate', 'rules'].includes(app.network)) {
       app.port ??= this.store.allocatePort();
       this.store.listenerPort(app.node);
     } else {
@@ -280,24 +308,125 @@ export class Sandgate {
     }
   }
 
-  #createApp(body) {
-    const app = validateApp(body);
+  /** Derives an instance's network from its profile. A whole-node profile is made on first use. */
+  #netFields(body, existing) {
+    const legacy = body.network !== undefined || body.node !== undefined;
+    const id = body.netProfile ?? (legacy ? undefined : existing?.netProfile);
+    if (id === NO_NETWORK || (id === undefined && body.network === 'none')) return { netProfile: NO_NETWORK, network: 'none', node: '' };
+    if (id === FOLLOW) return { netProfile: FOLLOW, network: 'open', node: '' };
+    if (id === undefined || id === '') {
+      const node = String(body.node ?? '').trim();
+      if (!node) throw new ValidationError('请选择网络配置');
+      const profile = this.store.nodeProfile(node);
+      this.store.listenerPort(node);
+      return { netProfile: profile.id, network: 'gate', node };
+    }
+    const profile = this.store.data.netProfiles.find((p) => p.id === id);
+    if (!profile) throw new ValidationError('网络配置不存在');
+    return profile.mode === 'node'
+      ? { netProfile: id, network: 'gate', node: profile.node }
+      : { netProfile: id, network: 'rules', node: ruleKey(id) };
+  }
+
+  /** A listener not yet in Clash means a sync. An existing profile's instances need none. */
+  async #syncIfNewListener(before) {
+    if (Object.keys(this.store.data.gate.listeners).length !== before) await this.clashSync.apply();
+  }
+
+  async #createApp(body) {
+    const before = Object.keys(this.store.data.gate.listeners).length;
+    const app = validateApp({ ...body, ...this.#netFields(body) });
     this.store.data.apps.push(app);
     this.#assignPorts(app);
     this.store.save();
     this.gates.sync(this.store.usedNodes());
+    await this.#syncIfNewListener(before);
     return this.apps.snapshot(app);
   }
 
+  async #netOptions() {
+    const { nodes, groups } = await this.client.proxies();
+    const builtin = new Set(['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL']);
+    const counts = new Map();
+    for (const r of (await this.client.rules()).rules ?? []) {
+      if (!builtin.has(r.proxy)) counts.set(r.proxy, (counts.get(r.proxy) ?? 0) + 1);
+    }
+    const policies = [...counts].map(([name, count]) => ({ name, count }));
+    return { policies, targets: [...groups.map((g) => g.name), ...nodes.map((n) => n.name)] };
+  }
+
+  /** Gives a profile its listener now, so later instances never need a Clash reload. */
+  #claimListener(profile) {
+    this.store.listenerPort(profile.mode === 'node' ? profile.node : ruleKey(profile.id));
+  }
+
+  #profileApps(id) {
+    return this.store.data.apps.filter((a) => a.netProfile === id);
+  }
+
+  async #createNetProfile(body) {
+    const profile = validateNetProfile(body);
+    if (profile.mode === 'node' && this.store.data.netProfiles.some((p) => p.mode === 'node' && p.node === profile.node)) {
+      throw new HttpError(409, '这个节点已经有配置了');
+    }
+    this.store.data.netProfiles.push(profile);
+    this.#claimListener(profile);
+    this.store.save();
+    return { profile, sync: await this.clashSync.apply() };
+  }
+
+  async #updateNetProfile(profile, body) {
+    const next = validateNetProfile(body, profile);
+    const users = this.#profileApps(profile.id);
+    if (next.mode !== profile.mode && users.some((a) => this.apps.isRunning(a.id))) {
+      throw new HttpError(409, '请先停止用这个配置的实例，再改模式');
+    }
+    if (next.mode === 'node' && this.store.data.netProfiles.some((p) => p !== profile && p.mode === 'node' && p.node === next.node)) {
+      throw new HttpError(409, '这个节点已经有配置了');
+    }
+    const oldKey = profile.mode === 'node' ? profile.node : ruleKey(profile.id);
+    Object.assign(profile, next);
+    this.#claimListener(profile);
+    const fields = this.#netFields({ netProfile: profile.id });
+    for (const a of users) {
+      Object.assign(a, fields);
+      this.#assignPorts(a);
+    }
+    this.#releaseListener(oldKey);
+    this.store.save();
+    this.gates.sync(this.store.usedNodes());
+    const sync = await this.clashSync.apply();
+    // Connections keep the exit they started with, so end them for the new rules to apply.
+    for (const a of users) this.apps.dropConnections(a.id);
+    return { profile, sync, dropped: users.length };
+  }
+
+  async #deleteNetProfile(profile) {
+    const users = this.#profileApps(profile.id);
+    if (users.length) throw new HttpError(409, `还有实例在用这个配置：${users.map((a) => a.name).join('、')}`);
+    this.store.data.netProfiles.splice(this.store.data.netProfiles.indexOf(profile), 1);
+    this.#releaseListener(profile.mode === 'node' ? profile.node : ruleKey(profile.id));
+    this.store.save();
+    return { sync: await this.clashSync.apply() };
+  }
+
+  /** Frees a listener nothing uses any more. */
+  #releaseListener(key) {
+    const inUse = this.store.data.netProfiles.some((p) => (p.mode === 'node' ? p.node : ruleKey(p.id)) === key);
+    if (!inUse) delete this.store.data.gate.listeners[key];
+  }
+
   async #updateApp(app, body) {
-    const next = validateApp(body, app);
+    const before = Object.keys(this.store.data.gate.listeners).length;
+    const next = validateApp({ ...body, ...this.#netFields(body, app) }, app);
     const networkChanged = next.network !== app.network || next.node !== app.node;
     if (networkChanged && this.apps.isRunning(app.id)) throw new HttpError(409, '请先停止应用再改节点或网络模式');
-    if (next.network !== 'gate') await this.apps.releasePort(app.id);
+    if (!['gate', 'rules'].includes(next.network)) await this.apps.releasePort(app.id);
     Object.assign(app, next);
     this.#assignPorts(app);
     this.store.save();
     this.gates.sync(this.store.usedNodes());
+    await this.#syncIfNewListener(before);
     return this.apps.snapshot(app);
   }
 
@@ -343,8 +472,10 @@ export class Sandgate {
     }
 
     for (const [node, port] of Object.entries(this.#activeListeners())) {
-      const label = `实例节点「${node}」`;
-      if (knownNodes && !knownNodes.includes(node)) {
+      const rules = isRuleKey(node);
+      const profile = rules ? this.store.data.netProfiles.find((p) => ruleKey(p.id) === node) : null;
+      const label = rules ? `网络配置「${profile?.name ?? node}」` : `实例节点「${node}」`;
+      if (!rules && knownNodes && !knownNodes.includes(node)) {
         add(`node-${port}`, label, 'fail', 'Clash 中没有这个节点');
         continue;
       }
@@ -352,9 +483,22 @@ export class Sandgate {
         await tcpProbe(port);
         add(`node-${port}`, label, 'ok', `listener ${port} 可连接`);
       } catch {
-        add(`node-${port}`, label, 'fail', `listener ${port} 未监听。把「网关配置」页生成的 listeners 配置加入 Clash Verge 的 Merge 配置并重载。`);
+        add(`node-${port}`, label, 'fail', `端口 ${port} 未监听。到「网络配置」页点“同步到 Clash”。`);
       }
     }
+    if (this.background) {
+      try {
+        const { missing, generatedAt } = this.clashSync.generatedStatus();
+        const when = new Date(generatedAt).toLocaleString('zh-CN', { hour12: false });
+        add('clash-generated', 'Clash Verge 生成的配置', missing.length ? 'warn' : 'ok', missing.length
+          ? `${when} 生成的配置里还没有 ${missing.join('、')}。它现在靠接口加载；如果更新订阅后仍缺少，说明脚本扩展没有生效。`
+          : `${when} 生成的配置已包含 SandGate 的内容，脚本扩展有效。`);
+      } catch (e) {
+        add('clash-generated', 'Clash Verge 生成的配置', 'warn', `无法读取：${e.message}`);
+      }
+    }
+    const { state, message } = this.clashSync.status;
+    add('clash-sync', '网络配置同步', { ok: 'ok', warn: 'warn', fail: 'fail' }[state] ?? 'warn', message);
     return { items };
   }
 }

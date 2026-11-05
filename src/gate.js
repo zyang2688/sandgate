@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import net from 'node:net';
 import { promisify } from 'node:util';
+import { isRuleKey } from './netprofile.js';
 
 const exec = promisify(execFile);
 
@@ -109,13 +110,14 @@ function confirmOnce(run) {
 export function buildChecks(settings, client, node) {
   const g = settings;
   const port = g.listeners[node];
+  const ruleBased = isRuleKey(node);
   let lastIface = null;
   const checks = [
     {
-      id: 'upstream', label: `节点 listener${port ? ` ${port}` : ''}`, intervalMs: 1000, timeoutMs: 1000,
+      id: 'upstream', label: `${ruleBased ? '规则入口' : '节点 listener'}${port ? ` ${port}` : ''}`, intervalMs: 1000, timeoutMs: 1000,
       run: async () => {
         if (!port) throw new Error('未分配端口');
-        try { await tcpProbe(port); } catch { throw new Error(`端口 ${port} 未监听，请把 listeners 配置加入 Clash Verge`); }
+        try { await tcpProbe(port); } catch { throw new Error(`端口 ${port} 未监听，请到「网络配置」页点“同步到 Clash”`); }
         return '可连接';
       },
     },
@@ -141,6 +143,7 @@ export function buildChecks(settings, client, node) {
       },
     });
   }
+  if (ruleBased) return checks; // no single node is correct for its traffic
   // Always runs so the page can say why an instance has no network. A dead node's listener
   // returns 502 and never falls back to direct, so by default this does not hold the gate.
   checks.push({
@@ -219,10 +222,26 @@ export class GateMonitor extends EventEmitter {
 
   tick() {
     const t = this.now();
+    this.#skipSleep(t);
     for (const c of this.checks) {
       if (!c.running && t >= c.nextRun) this.#runCheck(c);
     }
     this.evaluate();
+  }
+
+  /**
+   * A long gap between ticks means the Mac slept. Nothing was checked meanwhile, but
+   * nothing failed either, so results keep their age and every check runs again at once.
+   * Otherwise each wake would close all gates and drop their connections.
+   */
+  #skipSleep(t) {
+    const gap = t - (this.lastTick ?? t);
+    this.lastTick = t;
+    if (gap < Math.max(5000, this.tickMs * 10)) return;
+    for (const c of this.checks) {
+      if (c.result) c.result.at += gap;
+      c.nextRun = 0;
+    }
   }
 
   #runCheck(c) {
@@ -245,6 +264,11 @@ export class GateMonitor extends EventEmitter {
     return Boolean(c.result?.ok) && t - c.result.at <= c.intervalMs * 2 + c.timeoutMs;
   }
 
+  #failReason(c) {
+    const why = !c.result ? '等待结果' : c.result.ok ? '检查结果已过期' : c.result.detail;
+    return `${c.label}: ${why}`;
+  }
+
   evaluate() {
     const t = this.now();
     const failing = this.checks.filter((c) => !c.advisory && !this.#healthy(c, t));
@@ -258,7 +282,7 @@ export class GateMonitor extends EventEmitter {
         this.emit('open');
       } else {
         const c = failing[0];
-        this.#apply(false, this.locked ? '手动锁定' : c ? `${c.label}: ${c.result?.detail ?? '等待结果'}` : '无检查项');
+        this.#apply(false, this.locked ? '手动锁定' : c ? this.#failReason(c) : '无检查项');
       }
       return;
     }
@@ -266,8 +290,7 @@ export class GateMonitor extends EventEmitter {
     if (!next.open && this.locked) {
       this.lastReason = '手动锁定';
     } else if (!next.open && failing.length) {
-      const c = failing[0];
-      this.lastReason = `${c.label}: ${c.result?.detail ?? '等待结果'}`;
+      this.lastReason = this.#failReason(failing[0]);
     } else if (!next.open) {
       this.lastReason = '检查已通过，稳定观察中';
     }

@@ -11,6 +11,7 @@
     <div class="brand">SandGate</div>
     <nav id="tabs" class="tabs" aria-label="页面">
       <button data-tab="overview" class="tab active">总览</button>
+      <button data-tab="network" class="tab">网络配置</button>
       <button data-tab="settings" class="tab">配置</button>
       <button data-tab="preflight" class="tab">环境检查</button>
     </nav>
@@ -95,12 +96,7 @@
         </section>
 
         <section class="panel stack">
-          <div class="row between">
-            <h2>实例节点的 listeners</h2>
-            <button type="button" id="copy-snippet" class="btn small">复制</button>
-          </div>
-          <pre id="snippet" class="code"></pre>
-          <p class="muted">加入 Clash Verge 的 Merge 配置后重载。从这些端口进入的流量不经过规则，只走对应节点。新增节点后需要重新添加。</p>
+          <h2>实例节点的期望出口</h2>
           <div id="exit-ips" class="stack tight"></div>
         </section>
 
@@ -130,6 +126,25 @@
       </form>
     </div>
 
+    <div id="view-network" class="view" hidden>
+      <section class="panel">
+        <div class="row between">
+          <h2>网络配置</h2>
+          <button id="add-net" class="btn primary">新建配置</button>
+        </div>
+        <p class="muted">决定实例的流量怎么走。一个配置可以给多个实例用，修改后这些实例一起生效。</p>
+        <div id="net-list" class="apps"></div>
+      </section>
+      <section class="panel stack">
+        <div class="row between">
+          <h2>同步到 Clash</h2>
+          <button id="net-sync" class="btn">同步到 Clash</button>
+        </div>
+        <p id="net-sync-state" class="muted"></p>
+        <p class="muted">保存配置时会自动同步：更新 Clash Verge 的脚本扩展，再让正在运行的 Clash 重新加载，通常不用手动点。Clash Verge 换了订阅配置后，如果端口未监听，点这里即可。</p>
+      </section>
+    </div>
+
     <div id="view-preflight" class="view" hidden>
       <section class="panel">
         <div class="row between">
@@ -155,15 +170,10 @@
       <p id="preset-note" class="muted"></p>
       <label>名称 <input name="name" required maxlength="64"></label>
       <label>命令或 .app 路径 <input name="command" required spellcheck="false" placeholder="/usr/bin/curl"></label>
-      <label>网络
-        <select name="network">
-          <option value="gate">经指定节点联网</option>
-          <option value="none">完全禁网</option>
-        </select>
+      <label>网络配置
+        <select name="netProfile"></select>
       </label>
-      <label id="node-field">节点（所有流量都走它，不按 Clash 规则分流）
-        <input name="node" list="node-list" spellcheck="false">
-      </label>
+      <p id="net-profile-note" class="muted"></p>
       <label>时区（留空跟随系统。程序自己读取时区时才生效，建议和节点所在地一致）
         <input name="timezone" list="timezone-list" spellcheck="false">
       </label>
@@ -200,6 +210,37 @@
       </div>
     </form>
   </dialog>
+
+  <dialog id="net-dialog" class="dialog">
+    <form id="net-form" class="stack" method="dialog">
+      <h2 id="net-dialog-title">新建配置</h2>
+      <label>名称 <input name="name" required maxlength="64"></label>
+      <label>模式
+        <select name="mode">
+          <option value="custom">在 Clash 规则上修改</option>
+          <option value="node">全部走一个节点</option>
+        </select>
+      </label>
+      <p id="net-mode-note" class="muted"></p>
+      <label id="net-node-field">节点 <input name="node" list="node-list" spellcheck="false"></label>
+      <div id="net-custom" class="stack">
+        <div>
+          <div>替换出口（留空保持 Clash 里的选择）</div>
+          <div id="net-exits" class="stack tight"></div>
+          <p id="net-exits-note" class="muted"></p>
+        </div>
+        <label>额外规则（每行一条，优先于通用规则，例如 DOMAIN-SUFFIX,corp.example.com,DIRECT）<textarea name="extraRules" rows="3" spellcheck="false"></textarea></label>
+      </div>
+      <label>默认时区（新建实例时带入，留空跟随系统）<input name="timezone" list="timezone-list" spellcheck="false"></label>
+      <p id="net-error" class="error" role="alert"></p>
+      <div class="row end">
+        <button type="button" id="net-cancel" class="btn">取消</button>
+        <button type="submit" class="btn primary" value="save">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <datalist id="target-list"></datalist>
 
   <dialog id="output-dialog" class="dialog wide-dialog">
     <div class="stack">

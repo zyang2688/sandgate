@@ -19,6 +19,8 @@ export function findViolations(connections, { defaultNode, listeners }) {
     const via = c.chains?.[0];
     const m = String(c.metadata?.inboundName ?? '').match(LISTENER_NAME);
     if (m) return via !== nodeByPort.get(Number(m[1]));
+    // A profile's listener follows its own rules, so no single node is correct for it.
+    if (String(c.metadata?.inboundName ?? '').startsWith('sgp-')) return false;
     if (!defaultNode) return false;
     return via !== defaultNode && !ALWAYS_ALLOWED.has(via);
   });

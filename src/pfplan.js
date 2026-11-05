@@ -18,7 +18,7 @@ export function isIpv4Cidr(s) {
   return prefix === undefined || (/^\d+$/.test(prefix) && Number(prefix) <= 32);
 }
 
-function unquote(raw) {
+export function unquote(raw) {
   const v = raw.trim();
   if (v.startsWith("'") && v.endsWith("'") && v.length >= 2) return v.slice(1, -1).replace(/''/g, "'");
   if (v.startsWith('"') && v.endsWith('"') && v.length >= 2) {
@@ -49,7 +49,7 @@ function parseFlowItem(text) {
   return item;
 }
 
-function sectionLines(yaml, key) {
+export function sectionLines(yaml, key) {
   const lines = yaml.split(/\r?\n/);
   const start = lines.findIndex((l) => l.startsWith(`${key}:`));
   if (start < 0) return [];
@@ -215,7 +215,7 @@ export class PfPlanner {
 
   tick() {
     const g = this.getSettings();
-    const instanceNodes = this.store.usedNodes();
+    const instanceNodes = this.store.instanceTargets();
     const targets = [...new Set([...g.pfTargets, ...instanceNodes])];
     const warnings = [];
     if (!targets.length) warnings.push('尚未选择放行的节点或组');

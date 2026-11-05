@@ -7,10 +7,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { AppManager, nscurlBlocked } from '../src/apps.js';
-import { detectVerge, listenerSnippet, ClashClient } from '../src/clash.js';
+import { detectVerge, ClashClient } from '../src/clash.js';
 import { Store, ValidationError, expandPath, mergeGateSettings, validateApp, DEFAULT_SETTINGS } from '../src/config.js';
 import { Sandgate } from '../src/daemon.js';
-import { GateManager, GateMonitor, PinMismatch, decide, verifyPin } from '../src/gate.js';
+import { GateManager, GateMonitor, PinMismatch, buildChecks, decide, verifyPin } from '../src/gate.js';
+import { ClashSync, applySpec, buildSpec, currentScriptFile, missingTargets, renderRuntimeYaml, validateNetProfile, withManagedBlock } from '../src/netprofile.js';
 import { GatePort } from '../src/gateport.js';
 import { ConnectionGuard, findViolations, rulesFingerprint, ipv6Check, modeWarning } from '../src/guard.js';
 import { PfPlanner, parseCidrList, parseClashConfig, resolveTargets } from '../src/pfplan.js';
@@ -223,7 +224,7 @@ describe('validation', () => {
     assert.throws(() => validateApp({ name: '', command: '/bin/ls' }), ValidationError);
     assert.throws(() => validateApp({ name: 'a', command: '' }), ValidationError);
     assert.throws(() => validateApp({ name: 'a', command: '/bin/ls', env: { 'A B': 'x' } }), ValidationError);
-    assert.throws(() => validateApp({ name: 'a', command: '/bin/ls', network: 'open' }), ValidationError);
+    assert.throws(() => validateApp({ name: 'a', command: '/bin/ls', network: 'bogus' }), ValidationError);
     assert.throws(() => expandPath('relative/path'), ValidationError);
     assert.throws(() => expandPath('/a\nb'), ValidationError);
     assert.throws(() => validateApp({ name: 'a', command: '/bin/ls' }), /选择节点/);
@@ -336,13 +337,6 @@ describe('Clash integration (fake mihomo)', () => {
     assert.equal(detectVerge(home).controller.port, 9097);
     assert.equal(detectVerge(tmp()), null);
   });
-
-  test('listener snippet quotes node names safely', () => {
-    const s = listenerSnippet({ '日本 "01"': 17890, 美国: 17891 });
-    assert.match(s, /proxy: "日本 \\"01\\""/);
-    assert.match(s, /name: sandgate-17891/);
-    assert.match(s, /port: 17891\n    proxy: "美国"/);
-  });
 });
 
 describe('Web API security', () => {
@@ -450,10 +444,81 @@ describe('Web API security', () => {
     assert.notEqual(listeners.jp, listeners.us);
     const used = [a.port, b.port, c.port];
     assert.ok(!used.includes(listeners.jp) && !used.includes(listeners.us), 'listener and gate ports must not collide');
-    const { json } = await authed('/api/settings');
-    assert.match(json.listenerSnippet, /proxy: "jp"/);
-    assert.match(json.listenerSnippet, /proxy: "us"/);
-    assert.equal(json.listenerSnippet.match(/proxy: "jp"/g).length, 1, 'instances on one node share a listener');
+    const spec = buildSpec(app.store.data);
+    assert.equal(spec.listeners.filter((l) => l.proxy === 'jp').length, 1, 'instances on one node share a listener');
+    assert.equal(spec.listeners.filter((l) => l.proxy === 'us').length, 1);
+  });
+
+  describe('network profile API', () => {
+    const post = (path, body) => authed(path, { method: 'POST', body });
+    const inst = (name, netProfile) => post('/api/apps', { name, command: '/bin/ls', netProfile });
+    const customBody = (name, exits = { Proxy: 'us' }) => ({ name, mode: 'custom', exits, timezone: 'Asia/Tokyo' });
+
+    test('an instance can follow Clash, with no port or gate', async () => {
+      const { json } = await inst('f1', 'follow');
+      assert.equal(json.network, 'open');
+      assert.equal(json.port, null);
+      assert.equal(json.node, '');
+      await authed(`/api/apps/${json.id}`, { method: 'DELETE', body: {} });
+    });
+
+    test('a custom profile gives instances a port and their own gate, shared between them', async () => {
+      const { json: { profile } } = await post('/api/netprofiles', customBody('p-shared'));
+      const before = Object.keys(app.store.data.gate.listeners).length;
+      const a = (await inst('c1', profile.id)).json;
+      const b = (await inst('c2', profile.id)).json;
+      assert.equal(a.network, 'rules');
+      assert.equal(a.node, `sgp-${profile.id}`);
+      assert.notEqual(a.port, b.port);
+      assert.equal(Object.keys(app.store.data.gate.listeners).length, before, 'new instances need no new listener, so no Clash reload');
+      assert.ok((await authed('/api/state')).json.gates.nodes[a.node]);
+      for (const x of [a, b]) await authed(`/api/apps/${x.id}`, { method: 'DELETE', body: {} });
+    });
+
+    test('a profile in use cannot be deleted; an unused one releases its listener', async () => {
+      const { json: { profile } } = await post('/api/netprofiles', customBody('p-del'));
+      const key = `sgp-${profile.id}`;
+      const a = (await inst('d1', profile.id)).json;
+      const refused = await authed(`/api/netprofiles/${profile.id}`, { method: 'DELETE', body: {} });
+      assert.equal(refused.status, 409);
+      assert.match(refused.json.error, /d1/);
+      await authed(`/api/apps/${a.id}`, { method: 'DELETE', body: {} });
+      assert.equal((await authed(`/api/netprofiles/${profile.id}`, { method: 'DELETE', body: {} })).status, 200);
+      assert.equal(app.store.data.gate.listeners[key], undefined);
+    });
+
+    test('changing a node profile moves its stopped instances', async () => {
+      const { json: { profile } } = await post('/api/netprofiles', { name: 'p-node', mode: 'node', node: 'node-a' });
+      const a = (await inst('n1', profile.id)).json;
+      assert.equal(a.network, 'gate');
+      assert.equal(a.node, 'node-a');
+      const put = await authed(`/api/netprofiles/${profile.id}`, { method: 'PUT', body: { name: 'p-node', mode: 'node', node: 'node-b' } });
+      assert.equal(put.status, 200);
+      const moved = (await authed('/api/state')).json.apps.find((x) => x.id === a.id);
+      assert.equal(moved.node, 'node-b');
+      assert.equal(app.store.data.gate.listeners['node-a'], undefined);
+      assert.ok(app.store.data.gate.listeners['node-b']);
+      await authed(`/api/apps/${a.id}`, { method: 'DELETE', body: {} });
+      await authed(`/api/netprofiles/${profile.id}`, { method: 'DELETE', body: {} });
+    });
+
+    test('one node cannot have two profiles', async () => {
+      const { json: { profile } } = await post('/api/netprofiles', { name: 'p-one', mode: 'node', node: 'node-c' });
+      assert.equal((await post('/api/netprofiles', { name: 'p-two', mode: 'node', node: 'node-c' })).status, 409);
+      await authed(`/api/netprofiles/${profile.id}`, { method: 'DELETE', body: {} });
+    });
+
+    test('rejects a missing profile and a bad body', async () => {
+      assert.equal((await inst('x', 'ffffff')).status, 400);
+      assert.equal((await post('/api/netprofiles', { name: 'empty', mode: 'custom' })).status, 400);
+      assert.equal((await authed('/api/netprofiles/ffffff', { method: 'DELETE', body: {} })).status, 404);
+    });
+
+    test('the state lists profiles and the sync status', async () => {
+      const { json } = await authed('/api/state');
+      assert.ok(Array.isArray(json.netProfiles));
+      assert.ok(json.sync.state);
+    });
   });
 
   test('changing node on a stopped instance moves it; deleting the last user drops the gate', async () => {
@@ -1607,6 +1672,385 @@ describe('Clash mode and IPv6 checks', () => {
     await guard.tick();
     assert.equal(guard.status.modeWarning, '');
     assert.equal(guard.status.active, true);
+  });
+});
+
+describe('network profiles', () => {
+  const base = {
+    rules: ['DOMAIN,a.example,DIRECT', 'DOMAIN-SUFFIX,b.example,Proxy', 'IP-CIDR,1.2.3.0/24,AI,no-resolve', 'RULE-SET,set,REJECT', 'MATCH,Final'],
+    proxies: [{ name: 'us' }, { name: 'sg' }],
+    'proxy-groups': [{ name: 'Proxy' }, { name: 'AI' }, { name: 'Final' }],
+    listeners: [{ name: 'mine', port: 1 }, { name: 'sandgate-99', port: 99 }, { name: 'sgp-old', port: 98 }],
+    'sub-rules': { mine: ['MATCH,DIRECT'], 'sgp-old': ['MATCH,REJECT'] },
+  };
+  const custom = (over = {}) => ({ id: 'abc', name: 'c', mode: 'custom', node: '', exits: { Proxy: 'us', Final: 'us' }, extraRules: ['DOMAIN,x.example,DIRECT'], timezone: '', ...over });
+  const specOf = (netProfiles, listeners = { 'sgp-abc': 17990, sg: 17991 }) => buildSpec({ netProfiles, gate: { listeners } });
+
+  describe('validation', () => {
+    test('accepts both modes and drops empty exits', () => {
+      assert.deepEqual(validateNetProfile({ name: 'a', mode: 'custom', exits: { P: 'us', Q: ' ' } }).exits, { P: 'us' });
+      assert.equal(validateNetProfile({ name: 'a', mode: 'node', node: 'us' }).node, 'us');
+    });
+
+    test('a custom profile must change something', () => {
+      assert.throws(() => validateNetProfile({ name: 'a', mode: 'custom' }), /至少/);
+    });
+
+    test('rejects malformed or rule-hiding extra rules', () => {
+      for (const r of ['nonsense', 'DOMAIN,only-two', 'MATCH,x,DIRECT', 'AND,a,DIRECT', 'DOMAIN,a\nb,DIRECT']) {
+        assert.throws(() => validateNetProfile({ name: 'a', mode: 'custom', extraRules: [r] }), ValidationError, r);
+      }
+    });
+
+    test('a node profile needs a node', () => {
+      assert.throws(() => validateNetProfile({ name: 'a', mode: 'node' }), /节点/);
+    });
+  });
+
+  describe('applying to a config', () => {
+    const applied = () => applySpec(structuredClone(base), specOf([custom()]));
+
+    test('replaces only the chosen exits, and extra rules come first', () => {
+      assert.deepEqual(applied()['sub-rules']['sgp-abc'], [
+        'DOMAIN,x.example,DIRECT',
+        'DOMAIN,a.example,DIRECT',
+        'DOMAIN-SUFFIX,b.example,us',
+        'IP-CIDR,1.2.3.0/24,AI,no-resolve',
+        'RULE-SET,set,REJECT',
+        'MATCH,us',
+      ]);
+    });
+
+    test('never changes the main rules', () => {
+      assert.deepEqual(applied().rules, base.rules);
+    });
+
+    test('keeps the user\'s own entries and drops stale managed ones', () => {
+      const c = applied();
+      assert.deepEqual(c.listeners.map((l) => l.name), ['mine', 'sgp-abc']);
+      assert.deepEqual(Object.keys(c['sub-rules']).sort(), ['mine', 'sgp-abc']);
+    });
+
+    test('an unknown target rejects instead of breaking Clash or using another exit', () => {
+      const c = applySpec(structuredClone(base), specOf([custom({ exits: { Proxy: 'gone' }, extraRules: ['DOMAIN,x.example,alsogone'] })]));
+      assert.ok(c['sub-rules']['sgp-abc'].includes('DOMAIN-SUFFIX,b.example,REJECT'));
+      assert.equal(c['sub-rules']['sgp-abc'][0], 'DOMAIN,x.example,REJECT');
+    });
+
+    test('reports the targets it could not find', () => {
+      const missing = missingTargets(specOf([custom({ exits: { Proxy: 'gone', Final: 'us' }, extraRules: ['DOMAIN,x,alsogone'] })]), { proxies: base.proxies, groups: base['proxy-groups'] });
+      assert.deepEqual(missing.sort(), ['alsogone', 'gone']);
+    });
+
+    test('a node profile gets a listener with no rules', () => {
+      const spec = specOf([{ id: 'n', name: 'n', mode: 'node', node: 'sg', exits: {}, extraRules: [] }]);
+      assert.deepEqual(spec.listeners, [{ name: 'sandgate-17991', type: 'mixed', listen: '127.0.0.1', port: 17991, proxy: 'sg' }]);
+      assert.deepEqual(spec.subRules, {});
+    });
+
+    test('with no profiles it removes everything it managed', () => {
+      const c = applySpec(structuredClone(base), { listeners: [], subRules: {} });
+      assert.deepEqual(c.listeners.map((l) => l.name), ['mine']);
+      assert.deepEqual(Object.keys(c['sub-rules']), ['mine']);
+    });
+  });
+
+  describe('rewriting the generated YAML', () => {
+    const yaml = `mixed-port: 7890
+proxies:
+- name: us
+  type: ss
+  server: 1.1.1.1
+proxy-groups:
+- name: Proxy
+  type: select
+  proxies:
+  - us
+- name: 🧭 Final
+  type: select
+  proxies:
+  - us
+listeners:
+- name: mine
+  type: mixed
+  port: 1
+- name: sandgate-99
+  type: mixed
+  port: 99
+  proxy: us
+sub-rules:
+  mine:
+  - MATCH,DIRECT
+  sgp-old:
+  - MATCH,REJECT
+rules:
+- DOMAIN,a.example,DIRECT
+- MATCH,🧭 Final
+tun:
+  enable: true
+`;
+    const spec = specOf([custom({ exits: { '🧭 Final': 'us' }, extraRules: [] })]);
+    const topKeys = (t) => t.split('\n').filter((l) => /^[a-z]/.test(l)).map((l) => l.split(':')[0]);
+
+    test('keeps every other section and has each key once', () => {
+      const keys = topKeys(renderRuntimeYaml(yaml, spec));
+      assert.deepEqual([...keys].sort(), ['listeners', 'mixed-port', 'proxies', 'proxy-groups', 'rules', 'sub-rules', 'tun']);
+      assert.match(renderRuntimeYaml(yaml, spec), /tun:\n {2}enable: true/);
+    });
+
+    test('keeps unmanaged entries as written and replaces managed ones', () => {
+      const out = renderRuntimeYaml(yaml, spec);
+      assert.match(out, /- name: mine\n {2}type: mixed\n {2}port: 1/);
+      assert.match(out, / {2}mine:\n {2}- MATCH,DIRECT/);
+      assert.doesNotMatch(out, /sandgate-99|sgp-old/);
+      assert.match(out, /"name":"sgp-abc".*"rule":"sgp-abc"/);
+      assert.ok(out.includes('"MATCH,us"'));
+    });
+
+    test('running twice gives the same result', () => {
+      const once = renderRuntimeYaml(yaml, spec);
+      assert.equal(renderRuntimeYaml(once, spec), once);
+    });
+
+    test('with nothing to manage the sections disappear when empty', () => {
+      const plain = 'proxies:\n- name: us\n  type: ss\nrules:\n- MATCH,DIRECT\n';
+      assert.equal(renderRuntimeYaml(plain, { listeners: [], subRules: {} }), plain);
+    });
+  });
+
+  describe('the script extension', () => {
+    const script = 'function main(config, profileName) {\n  config.x = 1;\n  return config;\n}\n';
+    const spec = specOf([custom()]);
+
+    test('runs before the return and gives the same result as here', () => {
+      const out = withManagedBlock(script, spec);
+      const main = new Function(`${out};return main;`)();
+      const expected = applySpec({ ...structuredClone(base), x: 1 }, spec);
+      assert.deepEqual(main(structuredClone(base), 'p'), expected);
+    });
+
+    test('is plain ES5, since Clash Verge runs it in its own engine', () => {
+      const out = withManagedBlock(script, spec);
+      const generated = out.slice(out.indexOf('config = ('), out.indexOf('// <<<'));
+      assert.doesNotMatch(generated, /=>|\bconst\b|\blet\b|`/);
+    });
+
+    test('replaces its own block, and removing it restores the script exactly', () => {
+      const once = withManagedBlock(script, spec);
+      assert.equal(withManagedBlock(once, spec), once);
+      assert.equal(withManagedBlock(once, { listeners: [], subRules: {} }), script);
+    });
+
+    test('refuses a script it cannot place the block in', () => {
+      assert.throws(() => withManagedBlock('function main(c) { return c; }', spec), /return config/);
+    });
+
+    test('finds the current profile\'s script', () => {
+      const yaml = 'current: R1\nitems:\n- uid: S1\n  type: script\n  file: S1.js\n- uid: R1\n  type: remote\n  file: R1.yaml\n  option:\n    merge: M1\n    script: S1\n- uid: R2\n  file: R2.yaml\n  option:\n    script: S9\n';
+      assert.equal(currentScriptFile(yaml), 'S1.js');
+      assert.equal(currentScriptFile('current: X\nitems:\n- uid: X\n  file: x.yaml\n'), null);
+    });
+  });
+
+  describe('syncing to Clash', () => {
+    const VERGE = 'Library/Application Support/io.github.clash-verge-rev.clash-verge-rev';
+    const setup = ({ reload = async () => ({}) } = {}) => {
+      const home = tmp();
+      const dir = path.join(home, VERGE);
+      fs.mkdirSync(path.join(dir, 'profiles'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'profiles.yaml'), 'current: R\nitems:\n- uid: S\n  file: S.js\n- uid: R\n  file: R.yaml\n  option:\n    script: S\n');
+      const scriptFile = path.join(dir, 'profiles/S.js');
+      fs.writeFileSync(scriptFile, 'function main(config) {\n  return config;\n}\n');
+      fs.writeFileSync(path.join(dir, 'clash-verge.yaml'), 'proxies:\n- name: us\n  type: ss\nrules:\n- MATCH,DIRECT\n');
+      const store = new Store(path.join(tmp(), 'data'));
+      store.data.netProfiles.push(custom({ exits: { Proxy: 'us' }, extraRules: [] }));
+      store.data.gate.listeners['sgp-abc'] = 17990;
+      const payloads = [];
+      const sync = new ClashSync({ store, home, client: { reload: async (p) => { payloads.push(p); return reload(p); } } });
+      return { sync, scriptFile, store, payloads };
+    };
+
+    test('updates the script, keeps one backup, and loads the result', async () => {
+      const { sync, scriptFile, store, payloads } = setup();
+      const original = fs.readFileSync(scriptFile, 'utf8');
+      assert.equal((await sync.apply()).state, 'ok');
+      assert.match(fs.readFileSync(scriptFile, 'utf8'), /SandGate managed block/);
+      assert.match(payloads[0], /"name":"sgp-abc"/);
+      await sync.apply();
+      assert.equal(fs.readFileSync(path.join(store.dir, 'backups/S.js.before-sandgate'), 'utf8'), original);
+    });
+
+    test('a refused config is reported, and says Clash kept the old one', async () => {
+      const { sync } = setup({ reload: async () => { throw new Error('bad'); } });
+      const status = await sync.apply();
+      assert.equal(status.state, 'fail');
+      assert.match(status.message, /仍在使用原来的配置/);
+    });
+
+    test('warns about an exit Clash no longer has', async () => {
+      const { sync, store } = setup();
+      store.data.netProfiles[0].exits = { Proxy: 'gone' };
+      const status = await sync.apply();
+      assert.equal(status.state, 'warn');
+      assert.match(status.message, /gone/);
+    });
+
+    test('still reloads when the script cannot be updated, and says what that means', async () => {
+      const { sync, scriptFile, payloads } = setup();
+      fs.writeFileSync(scriptFile, 'function main(c) { return c; }');
+      const status = await sync.apply();
+      assert.equal(status.state, 'warn');
+      assert.match(status.message, /改动会丢失/);
+      assert.equal(payloads.length, 1);
+    });
+
+    test('tells whether Clash Verge\'s generated config has the managed entries', () => {
+      const { sync, store } = setup();
+      assert.deepEqual(sync.generatedStatus().missing, ['sgp-abc']);
+      const file = path.join(sync.vergeDir, 'clash-verge.yaml');
+      fs.writeFileSync(file, `${fs.readFileSync(file, 'utf8')}listeners:\n- name: sgp-abc\n  type: mixed\n  port: 17990\n  rule: sgp-abc\n`);
+      assert.deepEqual(sync.generatedStatus().missing, []);
+      assert.equal(store.data.netProfiles.length, 1);
+    });
+
+    test('does nothing when disabled, so tests never touch a real Clash', async () => {
+      const { store, payloads } = setup();
+      const sync = new ClashSync({ store, client: { reload: async (p) => payloads.push(p) }, enabled: false });
+      await sync.apply();
+      assert.equal(payloads.length, 0);
+    });
+  });
+
+  describe('instances', () => {
+    const sb = { port: 17900, sandgateDir: '/Users/t/.sandgate', instancesDir: '/Users/t/.sandgate-instances', instanceHome: '/Users/t/.sandgate-instances/abc', home: '/Users/t', tempDir: '/nonexistent/T' };
+    const inst = (over) => validateApp({ name: 'x', command: '/bin/ls', ...over });
+
+    test('following rules leaves the network open and sets no proxy', () => {
+      const a = inst({ network: 'open' });
+      assert.doesNotMatch(buildProfile(a, { ...sb, port: null }), /deny network\*\)/);
+      assert.equal(buildEnv(a, null, { HOME: '/Users/t' }, '/inst').HTTP_PROXY, undefined);
+    });
+
+    test('a rules instance keeps DNS and sockets working, and gets the proxy', () => {
+      const a = inst({ network: 'rules', node: 'sgp-abc' });
+      const p = buildProfile(a, sb);
+      assert.doesNotMatch(p, /mDNSResponder/);
+      assert.doesNotMatch(p, /deny network\*\)/);
+      assert.equal(buildEnv(a, 17900, { HOME: '/Users/t' }, '/inst').HTTP_PROXY, 'http://127.0.0.1:17900');
+    });
+
+    test('files stay isolated in every network mode', () => {
+      for (const network of ['open', 'rules']) {
+        const p = buildProfile(inst({ network, node: network === 'rules' ? 'sgp-abc' : '' }), sb);
+        assert.ok(p.includes('(deny file-read* file-write* (subpath "/Users/t"))'), network);
+        assert.ok(p.includes('(deny file-read* file-write* (subpath "/Users/t/.ssh"))'), network);
+      }
+    });
+
+    test('the Clash control socket stays blocked with the network open', () => {
+      const p = buildProfile(inst({ network: 'open' }), { ...sb, port: null, controllerSocket: '/tmp/c.sock' });
+      assert.match(p, /deny network\* \(literal "[^"]*c\.sock"\)/);
+    });
+
+    test('a whole-node instance is still locked to its port', () => {
+      assert.match(buildProfile(inst({ network: 'gate', node: 'us' }), sb), /\(deny network\*\)\n\(allow network-outbound \(remote ip "localhost:17900"\)\)/);
+    });
+
+    test('a saved whole-node instance becomes a profile with the same behavior', () => {
+      const dir = tmp();
+      fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+        gate: { listeners: { us: 17891 } },
+        apps: [
+          { id: 'a', name: 'a', command: '/bin/ls', args: [], network: 'gate', node: 'us', port: 17890 },
+          { id: 'b', name: 'b', command: '/bin/ls', args: [], network: 'gate', node: 'us', port: 17892 },
+          { id: 'c', name: 'c', command: '/bin/ls', args: [], network: 'none' },
+        ],
+      }));
+      const { data } = new Store(dir);
+      assert.equal(data.netProfiles.length, 1);
+      assert.equal(data.netProfiles[0].node, 'us');
+      assert.equal(data.apps[0].netProfile, data.netProfiles[0].id);
+      assert.equal(data.apps[1].netProfile, data.netProfiles[0].id);
+      assert.equal(data.apps[0].network, 'gate');
+      assert.equal(data.apps[2].netProfile, 'none');
+      assert.equal(new Store(dir).data.netProfiles[0].id, data.netProfiles[0].id, 'stable after a restart');
+    });
+
+    test('pf allows what a rules profile can dial, not its internal key', () => {
+      const store = new Store(path.join(tmp(), 'data'));
+      store.data.netProfiles.push(custom({ exits: { Proxy: 'us' }, extraRules: ['DOMAIN,x,sg', 'DOMAIN,y,DIRECT'] }));
+      store.data.apps.push(inst({ network: 'rules', node: 'sgp-abc', netProfile: 'abc' }), inst({ network: 'gate', node: 'jp' }), inst({ network: 'open' }));
+      assert.deepEqual(store.instanceTargets().sort(), ['DIRECT', 'jp', 'sg', 'us'].sort());
+      assert.deepEqual(store.usedNodes().sort(), ['jp', 'sgp-abc']);
+    });
+
+    test('a rules gate checks only that the entry and TUN are up', () => {
+      const ids = buildChecks({ ...structuredClone(DEFAULT_SETTINGS.gate), listeners: { 'sgp-abc': 1 }, exitIps: { 'sgp-abc': '1.1.1.1' } }, {}, 'sgp-abc').map((c) => c.id);
+      assert.deepEqual(ids, ['upstream', 'route', 'tun']);
+    });
+
+    test('the guard never judges a profile listener by a single node', () => {
+      const conn = { id: '1', chains: ['other'], metadata: { inboundName: 'sgp-abc' } };
+      assert.deepEqual(findViolations([conn], { defaultNode: 'us', listeners: {} }), []);
+    });
+  });
+});
+
+describe('waking from sleep', () => {
+  const setup = (run) => {
+    let t = 1000;
+    const mon = new GateMonitor({ checks: [{ id: 'c', label: 'C', intervalMs: 1000, timeoutMs: 1000, run }], stableMs: 10, tickMs: 500, now: () => t });
+    return { mon, advance: (ms) => { t += ms; } };
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 10));
+
+  test('a long gap does not close the gate, and every check runs again', async () => {
+    let runs = 0;
+    const { mon, advance } = setup(async () => { runs++; return 'ok'; });
+    const closed = [];
+    mon.on('close', (r) => closed.push(r));
+    mon.tick();
+    await settle();
+    advance(20);
+    mon.tick();
+    assert.equal(mon.open, true);
+    const before = runs;
+    advance(3600000);
+    mon.tick();
+    assert.equal(mon.open, true);
+    assert.deepEqual(closed, []);
+    await settle();
+    assert.ok(runs > before);
+  });
+
+  test('a check that really fails after waking still closes the gate', async () => {
+    let ok = true;
+    const { mon, advance } = setup(async () => { if (!ok) throw new Error('down'); return 'ok'; });
+    mon.tick();
+    await settle();
+    advance(20);
+    mon.tick();
+    assert.equal(mon.open, true);
+    ok = false;
+    advance(3600000);
+    mon.tick();
+    await settle();
+    assert.equal(mon.open, false);
+    assert.match(mon.snapshot().reason, /down/);
+  });
+
+  test('a stale result is described as stale, not as the old success', async () => {
+    const { mon, advance } = setup(async () => 'looks fine');
+    mon.tick();
+    await settle();
+    advance(20);
+    mon.tick();
+    const reasons = [];
+    mon.on('close', (r) => reasons.push(r));
+    mon.checks[0].running = true; // a hung check: it never reports again
+    for (let i = 0; i < 8; i++) { advance(1000); mon.tick(); }
+    assert.equal(mon.open, false);
+    assert.match(reasons[0], /已过期/);
   });
 });
 

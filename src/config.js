@@ -18,7 +18,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     requireTun: true,
     requireNode: false, // a dead node only fails its connections, so it need not close the gate
     requirePin: true,
-    stableSec: 6,
+    stableSec: 3,
     delayIntervalSec: 5,
     pinIntervalSec: 15,
     exitIntervalSec: 30,
@@ -50,7 +50,7 @@ const pathList = (v, label) => {
 export const DEFAULT_TIMEZONE = 'America/Los_Angeles';
 
 /** Empty means the system time zone. Intl rejects any name the runtime cannot resolve. */
-function validTimezone(v) {
+export function validTimezone(v) {
   const tz = String(v ?? '').trim();
   if (!tz) return '';
   try {
@@ -73,11 +73,12 @@ export function validateApp(input, existing = {}) {
   for (const [k, v] of Object.entries(env)) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) || typeof v !== 'string' || v.includes('\0')) fail(`环境变量无效: ${k}`);
   }
+  // gate: only its node, enforced by the sandbox. rules: its own sub-rules. open: Clash's rules.
   const network = input.network ?? 'gate';
-  if (!['gate', 'none'].includes(network)) fail('网络模式只能是 gate 或 none');
+  if (!['gate', 'rules', 'open', 'none'].includes(network)) fail('网络模式无效');
   const node = String(input.node ?? '').trim();
   if (hasControl(node)) fail('节点名无效');
-  if (network === 'gate' && !node) fail('请选择节点');
+  if (['gate', 'rules'].includes(network) && !node) fail('请选择节点');
   return {
     id: existing.id ?? crypto.randomBytes(5).toString('hex'),
     name,
@@ -87,7 +88,8 @@ export function validateApp(input, existing = {}) {
     env,
     timezone: validTimezone(input.timezone ?? existing.timezone ?? DEFAULT_TIMEZONE),
     network,
-    node: network === 'gate' ? node : '',
+    netProfile: String(input.netProfile ?? existing.netProfile ?? ''),
+    node: ['gate', 'rules'].includes(network) ? node : '',
     port: existing.port ?? null,
     isolateHome: input.isolateHome !== false,
     allowUnixSockets: Boolean(input.allowUnixSockets),
@@ -169,12 +171,13 @@ export class Store {
     fs.chmodSync(this.instancesDir, 0o700);
     this.data = this.#load();
     this.token = this.#loadToken();
+    if (this.migrated) this.save();
   }
 
   instanceHome(id) { return path.join(this.instancesDir, id); }
 
   #load() {
-    const base = structuredClone({ ...DEFAULT_SETTINGS, apps: [], locked: false });
+    const base = structuredClone({ ...DEFAULT_SETTINGS, apps: [], netProfiles: [], locked: false });
     if (!fs.existsSync(this.path)) return base;
     const raw = JSON.parse(fs.readFileSync(this.path, 'utf8'));
     const gate = { ...base.gate, ...raw.gate, controller: { ...base.gate.controller, ...raw.gate?.controller } };
@@ -185,7 +188,29 @@ export class Store {
       if (oldPort) cleanGate.listeners = { [oldNode]: oldPort, ...cleanGate.listeners };
     }
     const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, shared: [], timezone: '', ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
-    return { ...base, ...raw, gate: cleanGate, apps };
+    const netProfiles = raw.netProfiles ?? [];
+    // Instances from before network profiles: each node becomes a profile, with the same behavior.
+    for (const a of apps) {
+      if (a.netProfile) continue;
+      if (a.network === 'none') { a.netProfile = 'none'; continue; }
+      a.netProfile = Store.#nodeProfile(netProfiles, a.node).id;
+      this.migrated = true;
+    }
+    return { ...base, ...raw, gate: cleanGate, apps, netProfiles };
+  }
+
+  static #nodeProfile(profiles, node) {
+    let p = profiles.find((x) => x.mode === 'node' && x.node === node);
+    if (!p) {
+      p = { id: crypto.randomBytes(5).toString('hex'), name: `全部走 ${node}`, mode: 'node', node, exits: {}, extraRules: [], timezone: '' };
+      profiles.push(p);
+    }
+    return p;
+  }
+
+  /** The profile for a whole-node instance, created on first use. */
+  nodeProfile(node) {
+    return Store.#nodeProfile(this.data.netProfiles, node);
   }
 
   #loadToken() {
@@ -220,7 +245,22 @@ export class Store {
     return listeners[node];
   }
 
+  /** Gates are per listener: a node's name, or a profile's rule key. */
   usedNodes() {
-    return [...new Set(this.data.apps.filter((a) => a.network === 'gate' && a.node).map((a) => a.node))];
+    return [...new Set(this.data.apps.filter((a) => ['gate', 'rules'].includes(a.network) && a.node).map((a) => a.node))];
+  }
+
+  /** What instances can dial on the physical NIC, for pf's allow-list. */
+  instanceTargets() {
+    const out = new Set();
+    for (const a of this.data.apps) {
+      if (a.network === 'gate' && a.node) out.add(a.node);
+      if (a.network !== 'rules') continue;
+      const p = this.data.netProfiles.find((x) => x.id === a.netProfile);
+      for (const t of Object.values(p?.exits ?? {})) out.add(t);
+      for (const r of p?.extraRules ?? []) out.add(r.split(',')[2]?.trim());
+    }
+    out.delete(undefined);
+    return [...out];
   }
 }

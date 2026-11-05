@@ -17,6 +17,7 @@ export function nscurlBlocked(code, stderr) {
   return code !== 0 || stderr.includes('Load failed');
 }
 const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
+const usesPort = (app) => ['gate', 'rules'].includes(app.network);
 const LOG_LIMIT = 10 * 1024 * 1024;
 const TAIL_BYTES = 64 * 1024;
 
@@ -95,7 +96,7 @@ export class AppManager {
   }
 
   async #ensurePort(app) {
-    if (app.network !== 'gate' || this.ports.has(app.id)) return;
+    if (!usesPort(app) || this.ports.has(app.id)) return;
     const { id } = app;
     // Both read live state, so changing a stopped instance's node takes effect here.
     const gp = new GatePort({
@@ -117,7 +118,8 @@ export class AppManager {
     const home = this.store.instanceHome(id);
     this.#prepareDataDir(app);
     const vars = { port: app.port, home: app.isolateHome ? home : process.env.HOME, data: home };
-    const args = app.args.map((a) => expandVars(a, vars));
+    // An instance following Clash's rules has no port, so a preset's proxy flag does not apply.
+    const args = app.args.filter((a) => app.port || !a.includes('{port}')).map((a) => expandVars(a, vars));
     const log = new LogFile(path.join(this.store.logDir, `${id}.log`));
     log.write(Buffer.from(`\n=== ${new Date().toISOString()} start ${command} ===\n`));
 
@@ -180,6 +182,11 @@ export class AppManager {
     }
   }
 
+  /** Ends an instance's current connections; its next ones use the latest rules. */
+  dropConnections(id) {
+    this.ports.get(id)?.dropAll();
+  }
+
   async releasePort(id) {
     const gp = this.ports.get(id);
     if (gp) {
@@ -231,11 +238,15 @@ export class AppManager {
     }
 
     const curl = ['-s', '-o', '/dev/null', '--max-time', '5'];
+    // Instances following rules reach the network on purpose, so only their files are tested.
+    const pinned = !['open', 'rules'].includes(app.network);
     const denials = [
-      ['direct-ip', '直连公网 IP', '/usr/bin/curl', ...curl, '--noproxy', '*', 'https://223.5.5.5'],
-      ['direct-dns', '直连域名（含本地 DNS）', '/usr/bin/curl', ...curl, '--noproxy', '*', 'https://www.baidu.com'],
-      ['udp', 'UDP 发往 223.5.5.5:53', '/usr/bin/nc', '-u', '-z', '-w', '2', '223.5.5.5', '53'],
-      ['broker', '系统网络框架 (nscurl)', NSCURL, 'https://www.apple.com'],
+      ...(pinned ? [
+        ['direct-ip', '直连公网 IP', '/usr/bin/curl', ...curl, '--noproxy', '*', 'https://223.5.5.5'],
+        ['direct-dns', '直连域名（含本地 DNS）', '/usr/bin/curl', ...curl, '--noproxy', '*', 'https://www.baidu.com'],
+        ['udp', 'UDP 发往 223.5.5.5:53', '/usr/bin/nc', '-u', '-z', '-w', '2', '223.5.5.5', '53'],
+        ['broker', '系统网络框架 (nscurl)', NSCURL, 'https://www.apple.com'],
+      ] : []),
       ['token', '读取 SandGate 令牌', '/bin/cat', this.store.tokenPath],
       ['peers', '列出其他实例的目录', '/bin/ls', this.store.instancesDir],
     ];
@@ -246,7 +257,7 @@ export class AppManager {
       );
     }
     const listener = this.store.data.gate.listeners[app.node];
-    if (listener) {
+    if (listener && pinned) {
       denials.push(['listener', `绕过闸门直连 listener ${listener}`, '/usr/bin/curl', ...curl, '-x', `http://127.0.0.1:${listener}`, 'http://cp.cloudflare.com/generate_204']);
     }
     const results = [{ id: 'applied', label: '沙盒配置能否加载', ok: true, detail: '已加载' }];
@@ -256,7 +267,7 @@ export class AppManager {
       results.push({ id: pid, label, ok: blocked, detail: blocked ? `已拦截 (退出码 ${code})` : '泄漏：操作成功了' });
     }
     fs.rmSync(writeProbe, { force: true });
-    if (app.network === 'gate') {
+    if (usesPort(app)) {
       const code = await inBox('/usr/bin/curl', ...curl, '-x', `http://127.0.0.1:${app.port}`, 'http://cp.cloudflare.com/generate_204');
       results.push({
         id: 'via-gate',
