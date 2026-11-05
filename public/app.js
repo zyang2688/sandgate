@@ -91,7 +91,7 @@ function renderGates({ locked, nodes }) {
   $('lock-btn').dataset.locked = locked ? '1' : '';
   const entries = Object.entries(nodes);
   if (!entries.length) {
-    $('gates').innerHTML = '<div class="empty">新建经节点联网的实例后，这里会显示对应节点的状态。</div>';
+    $('gates').innerHTML = '<div class="empty">实例用到专用端口时，这里会显示它的状态。“跟随 Clash”的实例没有闸门。</div>';
     return;
   }
   $('gates').innerHTML = entries.map(([node, g]) => {
@@ -139,7 +139,7 @@ function renderApps(apps) {
     return `<div class="app">
       <div class="app-main">
         <div class="app-name">${esc(a.name)} <span class="badge ${a.running ? 'run' : ''}">${a.running ? `运行中 ${a.pid}` : '已停止'}</span> ${node}</div>
-        <div class="muted mono">${esc([a.command, ...a.args].join(' '))}</div>
+        <div class="muted mono">${esc([a.command, ...a.args.filter((x) => a.port || !x.includes('{port}'))].join(' '))}</div>
         <div class="muted">${esc(net + exit)}</div>
       </div>
       <div class="actions">
@@ -424,7 +424,7 @@ function renderExitIps(g) {
         <input data-exit-node="${esc(n)}" value="${esc(g.exitIps[n] ?? '')}" spellcheck="false" aria-label="${esc(n)} 的期望出口 IP">
         <button type="button" class="btn small" data-read-exit="${esc(n)}">读取当前</button>
       </div>`).join('')}`
-    : '';
+    : '<div class="muted">还没有“全部走一个节点”的配置。</div>';
 }
 
 function fillSettings({ gate: g, pfScript }) {
