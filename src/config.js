@@ -22,7 +22,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     delayIntervalSec: 5,
     pinIntervalSec: 15,
     exitIntervalSec: 30,
-    delayTimeoutMs: 3000,
+    delayTimeoutMs: 6000, // a chained node's test takes about 2.5 s, sometimes over 3 s
     probeUrl: 'http://cp.cloudflare.com/generate_204',
     exitIpUrl: 'https://api.ipify.org',
   },

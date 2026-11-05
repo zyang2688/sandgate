@@ -316,6 +316,7 @@ export class GateManager extends EventEmitter {
         locked: this.locked,
       });
       mon.on('close', (reason) => this.emit('close', node, reason));
+      mon.on('open', () => this.emit('open', node));
       this.monitors.set(node, mon);
       if (this.started) mon.start();
     }

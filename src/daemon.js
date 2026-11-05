@@ -72,6 +72,9 @@ export class Sandgate {
     this.gates.sync(this.store.usedNodes());
     this.gates.start();
     if (this.background) {
+      const stamp = () => new Date().toLocaleString('zh-CN', { hour12: false });
+      this.gates.on('close', (node, reason) => console.log(`${stamp()} 闸门关闭 ${node}: ${reason}`));
+      this.gates.on('open', (node) => console.log(`${stamp()} 闸门打开 ${node}`));
       this.guard.start();
       this.protection.start();
       this.pfPlanner.start();
