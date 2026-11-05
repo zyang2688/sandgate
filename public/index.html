@@ -89,7 +89,7 @@
             <label>默认分流允许的节点（留空不检查）<input name="defaultNode" list="node-list" spellcheck="false"></label>
           </div>
           <ul id="pf-plan" class="checks"></ul>
-          <p class="muted">SandGate 运行时会每 15 秒按配置重算放行列表，试运行中的 pf 每 30 秒同步一次。不在放行列表里的节点连不上，不会切过去。</p>
+          <p class="muted">SandGate 运行时会每 15 秒按配置重算放行列表，pf 每 30 秒检查一次，列表变化时才更新。不在放行列表里的节点连不上，不会切过去。</p>
         </section>
 
         <section class="panel stack">

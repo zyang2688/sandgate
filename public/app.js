@@ -416,10 +416,14 @@ function fillSettings({ gate: g, listenerSnippet, pfScript }) {
   f.exitUrl.value = g.exitIpUrl;
   $('snippet').textContent = listenerSnippet;
   $('pf-commands').textContent = [
-    '# 试运行 30 分钟，到时自动撤销；秒数可调，最长 86400',
-    `sudo bash "${pfScript}" trial 1800`,
-    '# 提前撤销，也是紧急恢复；重启同样会清除规则',
+    '# 安装：立即生效，之后每次开机自动加载',
+    `sudo bash "${pfScript}" install`,
+    '# 撤销，也是紧急恢复。安装后重启不会清除规则',
     `sudo bash "${pfScript}" uninstall`,
+    '# 查看状态',
+    `sudo bash "${pfScript}" status`,
+    '# 只想临时试用：到时自动撤销，最长 86400 秒。已安装时要先撤销',
+    `sudo bash "${pfScript}" trial 1800`,
   ].join('\n');
   renderExitIps(g);
 }

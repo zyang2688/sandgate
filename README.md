@@ -9,7 +9,7 @@ macOS 网络防护和多节点沙盒管理工具，通过 WebUI 配置。它有�
 | 应用要求 | 无 | 必须支持代理 |
 | UDP / QUIC | 正常 | 不支持 |
 | 节点挂了 | 走该节点的流量失败，直连不受影响 | 只有用该节点的实例断网 |
-| 需要 root | 试运行时需要 | 否 |
+| 需要 root | 需要 | 否 |
 
 ## 全机防护
 
@@ -23,20 +23,35 @@ Clash 中断 ─▶ 路由回落到物理网卡 ─▶ 国外被拦截；系统 
 
 Clash 中断时，依赖域名的程序基本都会断网，包括微信和国内网站。这是有意的取舍：放行系统 DNS 虽然能让国内网站继续用，但所有访问过的域名都会以明文发给 DNS 服务器。
 
-**目前只能试运行，还不能跨重启生效。**
-
 ```bash
-sudo bash scripts/sandgate-pf.sh trial 1800  # 试运行 30 分钟后自动撤销，最长 86400 秒
-sudo bash scripts/sandgate-pf.sh uninstall   # 提前撤销，也是紧急恢复
+sudo bash scripts/sandgate-pf.sh install     # 安装：立即生效，之后每次开机自动加载
+sudo bash scripts/sandgate-pf.sh uninstall   # 撤销，也是紧急恢复
 sudo bash scripts/sandgate-pf.sh status      # 查看状态
+sudo bash scripts/sandgate-pf.sh trial 1800  # 临时试用，到时自动撤销，最长 86400 秒
 bash scripts/sandgate-pf.sh render           # 只打印规则
 ```
 
-规则放在 `com.apple/sandgate` 这个 anchor 下，不修改 `/etc/pf.conf`，重启后不会保留。`ALLOW_LAN=0` 可以取消局域网、多播和链路本地放行。
+规则放在 `com.apple/sandgate` 这个 anchor 下，不修改 `/etc/pf.conf`。`ALLOW_LAN=0` 可以取消局域网、多播和链路本地放行，安装时设置会一直保留。
+
+### 安装后的行为
+
+`install` 把脚本复制到 `/usr/local/sbin/sandgate-pf`，并注册 root 权限的 LaunchDaemon `com.sandgate.pf`。日志写在 `/var/log/sandgate-pf.log`。
+
+- **加载：** 服务启动时加载一次规则。开机后的前 10 分钟每 30 秒确认规则确实生效，因为 macOS 开机时也会加载 `/etc/pf.conf`，两者的先后不固定。
+- **之后的 `pfctl` 调用：** 只在放行列表变化或出现新网卡时才调用。没有定时重载。
+- **服务退出：** 规则保留，只是列表不再更新。崩溃后由 launchd 重启。
+- **开机时列表不可用：** 使用 `/var/db/sandgate-pf/lists` 里上次校验通过的副本。
+- **开机早期：** 规则加载之前有一段没有防护的时间，通常在登录和 Clash 启动之前。
+
+**安装后重启不会再清除规则。** 系统出问题时：
+
+1. 能进系统就运行 `sudo /usr/local/sbin/sandgate-pf uninstall`。
+2. 连续两次开机都在 10 分钟内异常结束（panic、强制关机）时，服务会自动停止加载规则，直到重新运行 `install`。此时全机防护未生效，页面会显示暴露，`status` 也会提示。正常关机不计入。
+3. 崩溃如果发生在开机 10 分钟之后，这个保护不会触发，需要趁能操作时手动卸载。
 
 ### 放行列表如何更新
 
-在「配置」页填要放行的节点或组名。SandGate 每 15 秒读取 Clash Verge 生成的配置，算出物理网卡上实际要连的 IP，试运行中的 pf 每 30 秒同步一次，列表变化时才调用 `pfctl`。
+在「配置」页填要放行的节点或组名。SandGate 每 15 秒读取 Clash Verge 生成的配置，算出物理网卡上实际要连的 IP，pf 这边每 30 秒检查一次，列表变化时才调用 `pfctl`。
 
 - **组：** 展开为全部成员，订阅增删节点后自动跟随。
 - **链式节点：** 带 `dialer-proxy` 的节点放行它的前置节点，不放行它自己。它自己的服务器只经前置节点访问。
@@ -55,7 +70,7 @@ bash scripts/sandgate-pf.sh render           # 只打印规则
 - **节点地址在国内 IP 表里时无法拦截。** 比如使用国内中转的节点。
 - **规则写错就是真实直连。** 被判成 DIRECT 的网站看到的是你的真实 IP。
 - **物理网卡上的 IPv6 基本不可用。** 只保留局域网和链路本地地址，不放行节点和国内 IPv6。
-- **新网卡不受保护。** 规则按加载时的网卡生成，之后新插入的网卡不在规则内。
+- **新网卡最多有 30 秒空档。** 安装后新插入的网卡要等下一次检查才进入规则。试运行不跟随新网卡，插入后不受保护。
 - **未覆盖 `en` 以外的物理接口。** 蓝牙 PAN 等不在规则内。
 
 ### 2026-11-04 的内核死锁
@@ -127,7 +142,7 @@ node bin/sandgate.js service uninstall  # 移除后台服务，配置和数据�
 - **系统提示：** 安装后 macOS 可能提示新增了后台项目，可以在「系统设置 > 通用 > 登录项与扩展」里管理。
 
 1. **连接 Clash：** 在 Clash Verge 里开启外部控制，再到「配置」页点「从 Clash Verge 读取」。
-2. **全机防护：** 在「配置」页填放行的节点或组，按页面上的命令试运行。
+2. **全机防护：** 在「配置」页填放行的节点或组，按页面上的命令安装。
 3. **新建实例：** 在「总览」新建实例并选节点。
 4. **加 listener：** 把「配置」页生成的 `listeners` 配置加入 Clash Verge 的 Merge 配置并重载。
 5. **检查：** 「环境检查」应全部通过。对实例运行「泄漏自检」后再启动。

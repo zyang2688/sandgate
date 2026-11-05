@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
@@ -1030,9 +1030,210 @@ describe('pf rules', () => {
     assert.throws(() => render({ ALLOW_LAN: '1; pass out all' }, 'en0'));
   });
 
-  test('install stays closed and nothing persists across a reboot', () => {
-    assert.throws(() => execFileSync('/bin/bash', [script, 'install'], { stdio: 'pipe' }), (e) => e.status === 2 && e.stderr.toString().includes('暂未开放'));
-    assert.doesNotMatch(fs.readFileSync(script, 'utf8'), /StartInterval|WatchPaths|launchctl bootstrap/);
+  describe('installed daemon', () => {
+    const cnList = Array.from({ length: 1000 }, (_, i) => `36.${i >> 8}.${i & 255}.0/24`).join('\n');
+
+    // Runs the real functions against a fake pfctl and temporary paths.
+    function rig({ attached = true } = {}) {
+      const dir = tmp();
+      const src = path.join(dir, 'src');
+      fs.mkdirSync(src);
+      const writeLists = (nodes = '203.0.113.10') => {
+        fs.writeFileSync(path.join(src, 'nodes.txt'), `${nodes}\n`);
+        fs.writeFileSync(path.join(src, 'dns.txt'), '223.5.5.5\n');
+        fs.writeFileSync(path.join(src, 'cn.txt'), `${cnList}\n`);
+        fs.writeFileSync(path.join(src, 'extra.txt'), '');
+      };
+      writeLists();
+      const p = (name) => path.join(dir, name);
+      fs.writeFileSync(p('env'), `ALLOW_LAN=1\nLISTS_DIR=${src}\n`);
+      fs.writeFileSync(p('ifaces'), 'en0\n');
+      fs.writeFileSync(p('boot'), '100');
+      fs.writeFileSync(p('pfctl'), `#!/bin/bash
+printf "%s\n" "$*" >> "${p('calls')}"
+case "$*" in
+  "-E") echo "Token : 42" ;;
+  "-s rules") ${attached ? `echo 'anchor "com.apple/*" all'` : ':'} ;;
+  "-s info") echo "Status: Enabled" ;;
+  *"-s rules") echo "block drop out quick on en0 all" ;;
+esac
+exit 0
+`, { mode: 0o755 });
+      const state = p('state');
+      const prelude = `
+source '${script}'
+need_root() { :; }
+physical_interfaces() { /bin/cat '${p('ifaces')}'; }
+boot_id() { /bin/cat '${p('boot')}'; }
+PFCTL='${p('pfctl')}'; ENV_FILE='${p('env')}'; TOKEN_FILE='${p('token')}'; STATE_DIR='${state}'
+SYNC_SECONDS=0.2
+`;
+      const shell = (body) => execFileSync('/bin/bash', ['-c', `${prelude}\n${body}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      const calls = () => (fs.existsSync(p('calls')) ? fs.readFileSync(p('calls'), 'utf8').trim().split('\n') : []);
+      const start = (extra = '') => spawn('/bin/bash', ['-c', `${prelude}\n${extra}\nrun`], { stdio: 'ignore' });
+      return { dir, p, src, state, writeLists, shell, calls, start };
+    }
+
+    const until = async (check) => {
+      for (let i = 0; i < 100; i++) {
+        if (check()) return;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.fail('condition not reached');
+    };
+    const stop = (child) => new Promise((resolve) => { child.once('exit', (code) => resolve(code)); child.kill('SIGTERM'); });
+    const loads = (calls) => calls.filter((c) => /^-a com\.apple\/sandgate -f /.test(c));
+    const replaces = (calls) => calls.filter((c) => c.includes('-T replace'));
+
+    test('loads once, calls pfctl for tables only on a change, and keeps rules when stopped', async (t) => {
+      const r = rig();
+      const child = r.start();
+      t.after(() => child.kill('SIGKILL'));
+      await until(() => loads(r.calls()).length === 1 && r.calls().includes('-E'));
+      await new Promise((res) => setTimeout(res, 800));
+      assert.equal(loads(r.calls()).length, 1, 'no reload while nothing changes');
+      assert.equal(replaces(r.calls()).length, 0, 'no table updates while nothing changes');
+
+      r.writeLists('203.0.113.11');
+      await until(() => replaces(r.calls()).length === 4);
+      await until(() => fs.readFileSync(path.join(r.state, 'lists/nodes.txt'), 'utf8') === '203.0.113.11\n');
+      assert.equal(loads(r.calls()).length, 1, 'a list change swaps tables instead of reloading rules');
+
+      assert.equal(await stop(child), 0);
+      assert.equal(r.calls().filter((c) => c.includes('-F') || c.startsWith('-X')).length, 0, 'stopping never flushes or releases pf');
+      assert.equal(fs.readFileSync(path.join(r.state, 'failed'), 'utf8'), '0\n', 'a clean stop does not count as a failed boot');
+    });
+
+    test('a bad list changes nothing, and the next good one applies', async (t) => {
+      const r = rig();
+      const child = r.start();
+      t.after(() => child.kill('SIGKILL'));
+      await until(() => loads(r.calls()).length === 1);
+      fs.writeFileSync(path.join(r.src, 'nodes.txt'), '0.0.0.0/0\n');
+      await new Promise((res) => setTimeout(res, 800));
+      assert.equal(replaces(r.calls()).length, 0);
+      assert.equal(fs.readFileSync(path.join(r.state, 'lists/nodes.txt'), 'utf8'), '203.0.113.10\n');
+
+      r.writeLists('203.0.113.12');
+      await until(() => replaces(r.calls()).length === 4);
+      await stop(child);
+    });
+
+    test('a new NIC reloads the rules once with validated lists, and a removed one does not', async (t) => {
+      const r = rig();
+      const child = r.start();
+      t.after(() => child.kill('SIGKILL'));
+      await until(() => loads(r.calls()).length === 1);
+
+      fs.writeFileSync(r.p('ifaces'), 'en0\nen7\n');
+      await until(() => loads(r.calls()).length === 2);
+      const rules = fs.readFileSync(path.join(r.state, 'lists/rules.conf'), 'utf8');
+      assert.match(rules, /block drop out quick on en0 all/);
+      assert.match(rules, /block drop out quick on en7 all/);
+      assert.ok(rules.includes(`file "${path.join(r.state, 'lists')}/nodes.txt"`), 'tables load from the root-owned copy');
+
+      fs.writeFileSync(r.p('ifaces'), 'en0\n');
+      await new Promise((res) => setTimeout(res, 800));
+      assert.equal(loads(r.calls()).length, 2);
+      await stop(child);
+    });
+
+    test('boots from the last good lists when the source is unusable', async (t) => {
+      const r = rig();
+      fs.mkdirSync(path.join(r.state, 'lists'), { recursive: true });
+      for (const f of ['nodes', 'dns', 'cn', 'extra']) fs.copyFileSync(path.join(r.src, `${f}.txt`), path.join(r.state, 'lists', `${f}.txt`));
+      fs.rmSync(r.src, { recursive: true });
+      const child = r.start();
+      t.after(() => child.kill('SIGKILL'));
+      await until(() => loads(r.calls()).length === 1);
+      await stop(child);
+    });
+
+    test('exits with an error instead of loading when no list is usable', async () => {
+      const r = rig();
+      fs.rmSync(r.src, { recursive: true });
+      const code = await new Promise((resolve) => r.start().once('exit', resolve));
+      assert.equal(code, 1);
+      assert.equal(loads(r.calls()).length, 0);
+    });
+
+    test('restores a missing com.apple anchor while settling', async (t) => {
+      const r = rig({ attached: false });
+      const child = r.start();
+      t.after(() => child.kill('SIGKILL'));
+      await until(() => r.calls().includes('-f /etc/pf.conf'));
+      await stop(child);
+    });
+
+    test('checks stop once stable, which also clears the failed-boot count', async (t) => {
+      const r = rig();
+      const child = r.start('STABLE_SECONDS=1');
+      t.after(() => child.kill('SIGKILL'));
+      await until(() => fs.existsSync(path.join(r.state, 'failed')) && fs.readFileSync(path.join(r.state, 'failed'), 'utf8') === '0\n');
+      await new Promise((res) => setTimeout(res, 300));
+      const before = r.calls().length;
+      await new Promise((res) => setTimeout(res, 800));
+      assert.equal(r.calls().length, before, 'no pfctl calls at all once stable and unchanged');
+      await stop(child);
+    });
+
+    test('two unclean boots in a row stop the rules until the next install', () => {
+      const r = rig();
+      fs.mkdirSync(r.state);
+      const guard = (boot) => {
+        fs.writeFileSync(r.p('boot'), boot);
+        try { r.shell('boot_guard'); return true; } catch { return false; }
+      };
+      assert.equal(guard('1'), true);
+      assert.equal(guard('1'), true, 'a daemon restart in the same boot is not counted');
+      assert.equal(fs.readFileSync(path.join(r.state, 'failed'), 'utf8'), '1\n');
+      assert.equal(guard('2'), true);
+      assert.equal(guard('3'), false);
+      assert.ok(fs.existsSync(path.join(r.state, 'tripped')));
+      assert.equal(guard('4'), false, 'stays stopped on later boots');
+    });
+
+    test('boots that reach stability or stop cleanly are not counted', () => {
+      const r = rig();
+      fs.mkdirSync(r.state);
+      for (const boot of ['1', '2', '3', '4']) {
+        fs.writeFileSync(r.p('boot'), boot);
+        r.shell('boot_guard');
+        fs.writeFileSync(path.join(r.state, 'failed'), '0\n');
+      }
+      assert.equal(fs.existsSync(path.join(r.state, 'tripped')), false);
+    });
+
+    // macOS ships bash 3.2, which reads the bytes of a following Chinese character as part
+    // of the variable name. With `set -u` that killed the daemon right after loading rules.
+    test('no variable is followed directly by a non-ASCII character', () => {
+      for (const file of ['sandgate-pf.sh', 'pf-probe.sh']) {
+        const source = fs.readFileSync(path.join(import.meta.dirname, '../scripts', file), 'utf8');
+        assert.doesNotMatch(source, /\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]/, file);
+      }
+    });
+
+    test('the plist is valid, restarts only after a crash, and has no timers', () => {
+      const r = rig();
+      const plist = r.shell('render_plist');
+      const file = r.p('daemon.plist');
+      fs.writeFileSync(file, plist);
+      execFileSync('/usr/bin/plutil', ['-lint', '-s', file]);
+      assert.match(plist, /<key>SuccessfulExit<\/key><false\/>/);
+      assert.doesNotMatch(fs.readFileSync(script, 'utf8'), /<key>(StartInterval|StartCalendarInterval|WatchPaths)/);
+    });
+
+    test('install and run need root', () => {
+      for (const cmd of ['install', 'run']) {
+        assert.throws(() => execFileSync('/bin/bash', [script, cmd], { stdio: 'pipe' }), (e) => e.status === 2 && e.stderr.toString().includes('需要 sudo'));
+      }
+    });
+
+    test('the installed copy is not reachable from any path a normal user can change', () => {
+      const source = fs.readFileSync(script, 'utf8');
+      assert.match(source, /INSTALLED="\/usr\/local\/sbin\/sandgate-pf"/);
+      assert.match(source, /install -o root -g wheel -m 755 "\$self" "\$INSTALLED"/);
+    });
   });
 
   test('the old probe with a user rule stays disabled', () => {
