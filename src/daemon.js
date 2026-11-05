@@ -73,6 +73,7 @@ export class Sandgate {
     this.port = this.server.address().port;
     this.gates.sync(this.store.usedNodes());
     this.gates.start();
+    await this.apps.adopt();
     if (this.background) {
       const stamp = () => new Date().toLocaleString('zh-CN', { hour12: false });
       this.gates.on('close', (node, reason) => console.log(`${stamp()} 闸门关闭 ${node}: ${reason}`));
@@ -85,12 +86,14 @@ export class Sandgate {
     return { url: `http://127.0.0.1:${this.port}/#token=${this.store.token}` };
   }
 
-  async stop() {
+  /** `keepInstances` leaves them running for the next start to adopt. */
+  async stop({ keepInstances = false } = {}) {
     this.guard.stop();
     this.protection.stop();
     this.pfPlanner.stop();
     this.gates.stop();
-    await this.apps.stopAll();
+    if (keepInstances) await this.apps.release();
+    else await this.apps.stopAll();
     this.server.closeAllConnections();
     await new Promise((resolve) => this.server.close(resolve));
   }

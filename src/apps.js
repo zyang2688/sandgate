@@ -19,6 +19,7 @@ export function nscurlBlocked(code, stderr) {
 const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 const usesPort = (app) => ['gate', 'rules'].includes(app.network);
 const LOG_LIMIT = 10 * 1024 * 1024;
+const WATCH_MS = 2000;
 const TAIL_BYTES = 64 * 1024;
 
 /** `/Applications/Foo.app` → the executable inside, since a bundle cannot be exec'd. */
@@ -29,43 +30,62 @@ export async function resolveCommand(command) {
   return path.join(command, 'Contents/MacOS', stdout.trim());
 }
 
-class LogFile {
-  constructor(file) {
-    this.file = file;
-    this.#open();
-  }
-
-  #open() {
-    this.size = fs.existsSync(this.file) ? fs.statSync(this.file).size : 0;
-    if (this.size > LOG_LIMIT) this.#rotate();
-    this.fd = fs.openSync(this.file, 'a', 0o600);
-  }
-
-  #rotate() {
-    if (this.fd !== undefined) fs.closeSync(this.fd);
-    fs.renameSync(this.file, `${this.file}.old`);
-    this.fd = fs.openSync(this.file, 'a', 0o600);
-    this.size = 0;
-  }
-
-  write(data) {
-    if (this.fd === undefined) return;
-    if (this.size + data.length > LOG_LIMIT) this.#rotate();
-    fs.writeSync(this.fd, data);
-    this.size += data.length;
-  }
-
-  close() {
-    if (this.fd !== undefined) fs.closeSync(this.fd);
-    this.fd = undefined;
+/** Survives PID reuse: a recorded instance only counts as ours if its start time still matches. */
+async function psStartTime(pid) {
+  try {
+    const { stdout } = await exec('/bin/ps', ['-o', 'lstart=', '-p', String(pid)]);
+    return stdout.trim();
+  } catch {
+    return '';
   }
 }
 
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM';
+  }
+}
+
+const runsFile = (store) => path.join(store.dir, 'runs.json');
+
+function readRuns(store) {
+  try {
+    return JSON.parse(fs.readFileSync(runsFile(store), 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
+
+function signalGroup(pid, sig) {
+  try { process.kill(-pid, sig); } catch { /* already gone */ }
+}
+
+/**
+ * Stops instances recorded by a SandGate that is no longer running, for removing the
+ * service. A process whose start time changed is someone else's and is left alone.
+ */
+export async function stopRecordedInstances(store, { processStart = psStartTime, graceMs = 5000 } = {}) {
+  const records = Object.values(readRuns(store));
+  const ours = [];
+  for (const r of records) {
+    if (isAlive(r.pid) && r.started && (await processStart(r.pid)) === r.started) ours.push(r.pid);
+  }
+  for (const pid of ours) signalGroup(pid, 'SIGTERM');
+  const deadline = Date.now() + graceMs;
+  while (ours.some(isAlive) && Date.now() < deadline) await sleep(100);
+  for (const pid of ours.filter(isAlive)) signalGroup(pid, 'SIGKILL');
+  fs.rmSync(runsFile(store), { force: true });
+  return ours.length;
+}
+
 export class AppManager {
-  constructor({ store, gates, controllerSocket }) {
-    this.store = store;
-    this.gates = gates;
-    this.controllerSocket = controllerSocket;
+  constructor({ store, gates, controllerSocket, sandboxExec = SANDBOX_EXEC, processStart = psStartTime, watchMs = WATCH_MS, logLimit = LOG_LIMIT }) {
+    Object.assign(this, { store, gates, controllerSocket, sandboxExec, processStart, watchMs, logLimit });
     this.runs = new Map();
     this.ports = new Map();
     this.lastExit = new Map();
@@ -120,41 +140,107 @@ export class AppManager {
     const vars = { port: app.port, home: app.isolateHome ? home : process.env.HOME, data: home };
     // An instance following Clash's rules has no port, so a preset's proxy flag does not apply.
     const args = app.args.filter((a) => app.port || !a.includes('{port}')).map((a) => expandVars(a, vars));
-    const log = new LogFile(path.join(this.store.logDir, `${id}.log`));
-    log.write(Buffer.from(`\n=== ${new Date().toISOString()} start ${command} ===\n`));
+    const logPath = this.#logPath(id);
+    fs.appendFileSync(logPath, `\n=== ${new Date().toISOString()} start ${command} ===\n`, { mode: 0o600 });
+    // The instance writes to the file itself, so it keeps logging while SandGate restarts.
+    const logFd = fs.openSync(logPath, 'a', 0o600);
 
-    const child = spawn(SANDBOX_EXEC, ['-f', profile, command, ...args], {
+    const child = spawn(this.sandboxExec, ['-f', profile, command, ...args], {
       cwd: app.cwd || (app.isolateHome ? home : undefined),
       env: buildEnv(app, app.port, process.env, home),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: true, // own process group, so stop reaches every descendant
+      stdio: ['ignore', logFd, logFd],
+      detached: true, // own process group, so stop reaches every descendant and it outlives SandGate
     });
-    const run = { child, startedAt: Date.now(), log };
+    fs.closeSync(logFd);
+    child.unref();
+    const run = { pid: child.pid, startedAt: Date.now(), started: '', waiters: [] };
     this.runs.set(id, run);
-    child.stdout.on('data', (d) => log.write(d));
-    child.stderr.on('data', (d) => log.write(d));
-    child.once('error', (e) => log.write(Buffer.from(`[sandgate] 启动失败: ${e.message}\n`)));
-    child.once('close', (code, signal) => {
-      clearTimeout(run.killTimer);
-      this.runs.delete(id);
-      log.write(Buffer.from(`=== exit code=${code} signal=${signal} ===\n`));
-      log.close();
-      this.lastExit.set(id, { code, signal, at: Date.now() });
-    });
+    child.once('error', (e) => fs.appendFileSync(logPath, `[sandgate] 启动失败: ${e.message}\n`));
+    child.once('close', (code, signal) => this.#finish(id, run, { code, signal, at: Date.now() }));
+    this.#watch();
+    if (child.pid) run.started = await this.processStart(child.pid);
+    this.#saveRuns();
+  }
+
+  #logPath(id) {
+    return path.join(this.store.logDir, `${id}.log`);
+  }
+
+  #saveRuns() {
+    const records = Object.fromEntries([...this.runs].filter(([, r]) => r.pid).map(([id, r]) => [id, { pid: r.pid, startedAt: r.startedAt, started: r.started }]));
+    const tmp = `${runsFile(this.store)}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(records), { mode: 0o600 });
+    fs.renameSync(tmp, runsFile(this.store));
+  }
+
+  #finish(id, run, exit) {
+    if (this.runs.get(id) !== run) return;
+    clearTimeout(run.killTimer);
+    this.runs.delete(id);
+    this.lastExit.set(id, exit);
+    const how = exit.unknown ? '退出码未知（实例是重启后接管的）' : `exit code=${exit.code} signal=${exit.signal}`;
+    try { fs.appendFileSync(this.#logPath(id), `=== ${how} ===\n`); } catch { /* the instance may have been deleted */ }
+    this.#saveRuns();
+    for (const resolve of run.waiters) resolve();
+  }
+
+  /** Picks up instances a previous SandGate left running, after checking they are the same processes. */
+  async adopt() {
+    for (const [id, r] of Object.entries(readRuns(this.store))) {
+      const app = this.find(id);
+      if (!app) continue;
+      const started = isAlive(r.pid) ? await this.processStart(r.pid) : '';
+      if (!started || started !== r.started) {
+        this.lastExit.set(id, { code: null, signal: null, at: Date.now(), unknown: true });
+        continue;
+      }
+      this.runs.set(id, { pid: r.pid, startedAt: r.startedAt, started, waiters: [], adopted: true });
+      try {
+        await this.#ensurePort(app);
+      } catch (e) {
+        console.error(`实例 ${app.name} 的闸门端口无法恢复：${e.message}`);
+      }
+    }
+    this.#saveRuns();
+    if (this.runs.size) this.#watch();
+  }
+
+  /** An adopted instance is not our child, so no exit event arrives. Logs are capped here too. */
+  #watch() {
+    this.watcher ??= setInterval(() => this.#checkRuns(), this.watchMs);
+    this.watcher.unref();
+  }
+
+  #checkRuns() {
+    for (const [id, run] of this.runs) {
+      if (run.adopted && !isAlive(run.pid)) {
+        this.#finish(id, run, { code: null, signal: null, at: Date.now(), unknown: true });
+        continue;
+      }
+      this.#capLog(id);
+    }
+  }
+
+  /** Instances append with O_APPEND, so truncating is safe while they keep writing. */
+  #capLog(id) {
+    const file = this.#logPath(id);
+    try {
+      if (fs.statSync(file).size <= this.logLimit) return;
+      fs.copyFileSync(file, `${file}.old`);
+      fs.truncateSync(file, 0);
+    } catch { /* no log yet */ }
   }
 
   stop(id) {
     const run = this.runs.get(id);
     if (!run) return Promise.resolve();
     return new Promise((resolve) => {
-      run.child.once('close', () => resolve());
-      this.#signal(run, 'SIGTERM');
-      run.killTimer = setTimeout(() => this.#signal(run, 'SIGKILL'), 5000);
+      run.waiters.push(resolve);
+      signalGroup(run.pid, 'SIGTERM');
+      run.killTimer = setTimeout(() => signalGroup(run.pid, 'SIGKILL'), 5000);
+      run.killTimer.unref?.();
+      if (run.adopted) this.#checkRuns();
     });
-  }
-
-  #signal(run, sig) {
-    try { process.kill(-run.child.pid, sig); } catch { /* already gone */ }
   }
 
   /** A shared-data instance gets a directory only if it asks for one through {data}. */
@@ -221,7 +307,7 @@ export class AppManager {
     const writeProbe = path.join(os.homedir(), `.sandgate-probe-${id}`);
     const runInBox = async (cmd, ...args) => {
       try {
-        const { stderr } = await exec(SANDBOX_EXEC, ['-f', profile, cmd, ...args], { timeout: 15000, env: buildEnv({ ...app, network: 'none', isolateHome: false, env: {} }, null) });
+        const { stderr } = await exec(this.sandboxExec, ['-f', profile, cmd, ...args], { timeout: 15000, env: buildEnv({ ...app, network: 'none', isolateHome: false, env: {} }, null) });
         return { code: 0, stderr };
       } catch (e) {
         return { code: typeof e.code === 'number' ? e.code : -1, stderr: String(e.stderr ?? '') };
@@ -285,7 +371,7 @@ export class AppManager {
     return {
       ...app,
       running: Boolean(run),
-      pid: run?.child.pid ?? null,
+      pid: run?.pid ?? null,
       startedAt: run?.startedAt ?? null,
       lastExit: this.lastExit.get(app.id) ?? null,
       gateOpen: this.gates.isOpen(app.node),
@@ -296,6 +382,13 @@ export class AppManager {
 
   async stopAll() {
     await Promise.all([...this.runs.keys()].map((id) => this.stop(id)));
+    await this.release();
+  }
+
+  /** Lets go without stopping anything, so a restarted SandGate can adopt the instances. */
+  async release() {
+    clearInterval(this.watcher);
+    this.watcher = null;
     await Promise.all([...this.ports.keys()].map((id) => this.releasePort(id)));
   }
 }

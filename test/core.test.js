@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
-import { AppManager, nscurlBlocked } from '../src/apps.js';
+import { AppManager, nscurlBlocked, stopRecordedInstances } from '../src/apps.js';
 import { appLabel, groupApps } from '../public/grouping.js';
 import { detectVerge, ClashClient } from '../src/clash.js';
 import { Store, ValidationError, expandPath, mergeGateSettings, validateApp, DEFAULT_SETTINGS } from '../src/config.js';
@@ -2136,6 +2136,188 @@ describe('grouping instances on the page', () => {
     assert.equal(appLabel('/Applications/Visual Studio Code.app'), 'Visual Studio Code');
     assert.equal(appLabel('/Applications/Foo.app/'), 'Foo');
     assert.equal(appLabel('/usr/bin/curl'), 'curl');
+  });
+});
+
+describe('instances outlive a SandGate restart', () => {
+  const setup = (t) => {
+    const dir = tmp();
+    const fake = path.join(dir, 'fake-sandbox-exec');
+    fs.writeFileSync(fake, '#!/bin/sh\nshift 2\nexec "$@"\n', { mode: 0o755 });
+    const store = new Store(path.join(dir, 'data'));
+    const starts = new Map();
+    const processStart = async (pid) => starts.get(pid) ?? `started-${pid}`;
+    const manager = (over = {}) => new AppManager({ store, gates: { on() {}, isOpen: () => false }, controllerSocket: () => '', sandboxExec: fake, processStart, watchMs: 40, ...over });
+    const add = (script, over = {}) => {
+      const a = { ...validateApp({ name: 'x', command: '/bin/sh', args: ['-c', script], network: 'none', isolateHome: false }), ...over };
+      store.data.apps.push(a);
+      return a;
+    };
+    const pids = [];
+    t.after(() => { for (const p of pids) { try { process.kill(-p, 'SIGKILL'); } catch { /* gone */ } } });
+    return { store, manager, add, starts, pids, logOf: (a) => fs.readFileSync(path.join(store.logDir, `${a.id}.log`), 'utf8') };
+  };
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const until = async (fn, ms = 4000) => { const s = Date.now(); while (!fn() && Date.now() - s < ms) await sleep(20); return fn(); };
+  const LONG = 'echo hello; exec sleep 60';
+
+  test('releasing leaves it running, and the next manager adopts and can stop it', async (t) => {
+    const { manager, add, pids, logOf } = setup(t);
+    const a = add(LONG);
+    const first = manager();
+    await first.start(a.id);
+    const { pid } = first.snapshot(a);
+    pids.push(pid);
+    await until(() => logOf(a).includes('hello'));
+    await first.release();
+    assert.equal(alive(pid), true, 'release must not stop instances');
+
+    const second = manager();
+    await second.adopt();
+    assert.equal(second.isRunning(a.id), true);
+    assert.equal(second.snapshot(a).pid, pid);
+    await second.stop(a.id);
+    assert.equal(await until(() => !alive(pid)), true);
+    assert.equal(second.isRunning(a.id), false);
+    assert.equal(second.snapshot(a).lastExit.unknown, true);
+    await second.release();
+  });
+
+  test('it keeps logging with nobody holding a pipe', async (t) => {
+    const { manager, add, pids, logOf } = setup(t);
+    const a = add('sleep 0.3; echo after-release; exec sleep 60');
+    const m = manager();
+    await m.start(a.id);
+    pids.push(m.snapshot(a).pid);
+    await m.release();
+    assert.equal(await until(() => logOf(a).includes('after-release')), true);
+  });
+
+  test('an adopted instance that exits is noticed', async (t) => {
+    const { manager, add, pids } = setup(t);
+    const a = add(LONG);
+    const first = manager();
+    await first.start(a.id);
+    const { pid } = first.snapshot(a);
+    pids.push(pid);
+    await first.release();
+    const second = manager();
+    await second.adopt();
+    process.kill(-pid, 'SIGKILL');
+    assert.equal(await until(() => !second.isRunning(a.id)), true);
+    assert.equal(second.snapshot(a).lastExit.unknown, true);
+    await second.release();
+  });
+
+  test('a reused process id is not adopted, and is left alone', async (t) => {
+    const { manager, add, pids, starts } = setup(t);
+    const a = add(LONG);
+    const first = manager();
+    await first.start(a.id);
+    const { pid } = first.snapshot(a);
+    pids.push(pid);
+    await first.release();
+    starts.set(pid, 'some other process');
+    const second = manager();
+    await second.adopt();
+    assert.equal(second.isRunning(a.id), false);
+    assert.equal(alive(pid), true);
+    await second.release();
+  });
+
+  test('a recorded instance that died meanwhile just shows as stopped', async (t) => {
+    const { manager, add, store } = setup(t);
+    const a = add(LONG);
+    const dead = execFileSync('/bin/sh', ['-c', 'sh -c "exit 0" & echo $!'], { encoding: 'utf8' }).trim();
+    await until(() => !alive(Number(dead)));
+    fs.writeFileSync(path.join(store.dir, 'runs.json'), JSON.stringify({ [a.id]: { pid: Number(dead), startedAt: 1, started: `started-${dead}` } }));
+    const m = manager();
+    await m.adopt();
+    assert.equal(m.isRunning(a.id), false);
+    assert.equal(m.snapshot(a).lastExit.unknown, true);
+    await m.release();
+  });
+
+  test('its own child still reports a real exit code', async (t) => {
+    const { manager, add } = setup(t);
+    const a = add('exit 3');
+    const m = manager();
+    await m.start(a.id);
+    assert.equal(await until(() => !m.isRunning(a.id)), true);
+    assert.equal(m.snapshot(a).lastExit.code, 3);
+    await m.release();
+  });
+
+  test('stopAll still stops everything, and leaves nothing to adopt', async (t) => {
+    const { manager, add, pids } = setup(t);
+    const a = add(LONG);
+    const m = manager();
+    await m.start(a.id);
+    const { pid } = m.snapshot(a);
+    pids.push(pid);
+    await m.stopAll();
+    assert.equal(await until(() => !alive(pid)), true);
+    const next = manager();
+    await next.adopt();
+    assert.equal(next.isRunning(a.id), false);
+    await next.release();
+  });
+
+  test('a gate port comes back on the same port', async (t) => {
+    const { manager, add, pids } = setup(t);
+    const srv = net.createServer();
+    const port = await listen(srv);
+    await new Promise((r) => srv.close(r));
+    const a = add(LONG, { network: 'gate', node: 'n', port });
+    const first = manager();
+    await first.start(a.id);
+    pids.push(first.snapshot(a).pid);
+    await first.release();
+    const second = manager();
+    await second.adopt();
+    const connected = await new Promise((resolve) => {
+      const c = net.connect(port, '127.0.0.1', () => { c.destroy(); resolve(true); });
+      c.on('error', () => resolve(false));
+    });
+    assert.equal(connected, true);
+    await second.release();
+  });
+
+  test('long logs are capped without stopping the instance', async (t) => {
+    const { manager, add, pids, logOf, store } = setup(t);
+    const a = add('i=0; while [ $i -lt 400 ]; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done; exec sleep 60');
+    const m = manager({ logLimit: 500 });
+    await m.start(a.id);
+    const { pid } = m.snapshot(a);
+    pids.push(pid);
+    assert.equal(await until(() => fs.existsSync(path.join(store.logDir, `${a.id}.log.old`))), true);
+    assert.ok(logOf(a).length < 20000);
+    assert.equal(alive(pid), true);
+    await m.release();
+  });
+
+  test('removing the service stops recorded instances, but not a reused process id', async (t) => {
+    const { manager, add, pids, starts, store } = setup(t);
+    const a = add(LONG);
+    const b = add(LONG);
+    const m = manager();
+    await m.start(a.id);
+    await m.start(b.id);
+    const pa = m.snapshot(a).pid;
+    const pb = m.snapshot(b).pid;
+    pids.push(pa, pb);
+    await m.release();
+    starts.set(pb, 'some other process');
+    const processStart = async (pid) => starts.get(pid) ?? `started-${pid}`;
+    assert.equal(await stopRecordedInstances(store, { processStart }), 1);
+    assert.equal(await until(() => !alive(pa)), true);
+    assert.equal(alive(pb), true);
+    assert.equal(fs.existsSync(path.join(store.dir, 'runs.json')), false);
+  });
+
+  test('the service keeps launchd from cleaning up its instances', () => {
+    const plist = buildPlist({ node: '/n', entry: '/a/bin/x.js', logFile: '/l', home: '/h' });
+    assert.match(plist, /<key>AbandonProcessGroup<\/key><true\/>/);
   });
 });
 

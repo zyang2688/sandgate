@@ -142,7 +142,7 @@ function appCard(a) {
   const net = hasGate
     ? `闸门端口 ${a.port} · ${a.conns} 个连接 · ↑${bytes(a.stats.up)} ↓${bytes(a.stats.down)} · 拒绝 ${a.stats.refused}`
     : a.network === 'open' ? '跟随 Clash 规则' : '完全禁网';
-  const exit = !a.running && a.lastExit ? ` · 上次退出码 ${a.lastExit.code ?? a.lastExit.signal}` : '';
+  const exit = !a.running && a.lastExit ? (a.lastExit.unknown ? ' · 已退出' : ` · 上次退出码 ${a.lastExit.code ?? a.lastExit.signal}`) : '';
   const node = hasGate
     ? `<span class="badge ${a.gateOpen ? 'run' : 'closed'}">${esc(netProfiles.find((p) => p.id === a.netProfile)?.name ?? a.node)}</span>`
     : '';
@@ -264,7 +264,7 @@ $('apps').addEventListener('click', async (e) => {
     }
     if (act === 'logs') {
       const { text } = await api(`apps/${id}/logs`);
-      return showOutput(`日志：${app.name}`, text || '（暂无日志）');
+      return showOutput(`日志：${app.name}`, text || '（暂无日志）', `程序输出的时间用实例时区（${app.timezone || '跟随系统'}），“=== 时间 start”这类记录用 UTC（末尾带 Z）。`);
     } else if (act === 'profile') {
       const { text } = await api(`apps/${id}/profile`);
       return showOutput(`沙盒配置：${app.name}`, text);
@@ -287,8 +287,10 @@ $('apps').addEventListener('click', async (e) => {
   }
 });
 
-function showOutput(title, text) {
+function showOutput(title, text, note = '') {
   $('output-title').textContent = title;
+  $('output-note').textContent = note;
+  $('output-note').hidden = !note;
   $('output-list').innerHTML = '';
   $('output-list').hidden = true;
   $('output-text').hidden = false;
@@ -298,6 +300,7 @@ function showOutput(title, text) {
 
 function showVerify(app, r) {
   const state = r.gateOpen ? '闸门开启' : '闸门关闭';
+  $('output-note').hidden = true;
   $('output-title').textContent = `泄漏自检：${app.name}（${state}）${r.ok ? '全部通过' : '发现问题'}`;
   $('output-list').hidden = false;
   $('output-list').innerHTML = r.results.map((x) => checkRow(x.ok ? 'ok' : 'fail', x.label, x.detail)).join('');

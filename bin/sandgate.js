@@ -2,6 +2,7 @@
 import { Store } from '../src/config.js';
 import { Sandgate } from '../src/daemon.js';
 import { ServiceManager, startMessage } from '../src/service.js';
+import { stopRecordedInstances } from '../src/apps.js';
 
 const USAGE = `用法:
   sandgate.js                     在当前终端运行
@@ -29,7 +30,9 @@ async function runDaemon() {
     process.on(sig, async () => {
       if (stopping) process.exit(1);
       stopping = true;
-      await app.stop();
+      // launchd restarts the service with SIGTERM, and instances should outlive that.
+      // Ctrl-C in a terminal means the user is finished with them.
+      await app.stop({ keepInstances: sig === 'SIGTERM' });
       process.exit(0);
     });
   }
@@ -49,7 +52,8 @@ async function runService(action) {
       return;
     case 'uninstall':
       await service.uninstall().catch(failed);
-      console.log('已移除后台服务。配置和数据保留在原处。');
+      await stopRecordedInstances(store);
+      console.log('已移除后台服务，运行中的实例已停止。配置和数据保留在原处。');
       return;
     case 'status': {
       const s = await service.status();

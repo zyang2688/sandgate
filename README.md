@@ -284,6 +284,15 @@ SandGate 也会接管配置里名字以 `sandgate-` 或 `sgp-` 开头的端口�
 
 它通过环境变量 `TZ` 生效，手动写的 `TZ` 环境变量优先。网络配置里的默认时区只在页面上选择配置时带入实例，之后改配置不会同步到已有实例。
 
+**看日志时要注意，不同来源的时间不是同一个时区：**
+
+| 来源 | 时区 | 例子 |
+|---|---|---|
+| 实例日志里程序自己输出的时间 | 实例的时区 | 默认是洛杉矶时间 |
+| 实例日志里 SandGate 写的启动记录 | UTC | `=== 2026-11-05T04:22:09.574Z start ... ===`，末尾的 `Z` 表示 UTC |
+| `~/.sandgate/logs/daemon.log` 的闸门记录 | 本机时区 | `2026/11/5 19:06:44 闸门关闭 ...` |
+| `/var/log/sandgate-pf.log` | 本机时区 | `2026-11-05 11:56:30 规则已加载 ...` |
+
 ### 程序预设和多开
 
 点实例的“再开一个”可以复制一份，再选另一个网络配置。
@@ -345,11 +354,13 @@ Chromium 预设包含这些参数：
 | 同步失败或提示“改动会丢失” | 当前 Clash Verge 配置没有脚本扩展，或者脚本里找不到 `return config`。给它启用脚本扩展后再同步 |
 | 弹窗“a keychain cannot be found” | 点 **Cancel，不要点 Reset To Defaults**。给这个实例加上 `--use-mock-keychain` |
 | Chrome 提示 `--no-sandbox` 不受支持 | 正常现象，点 × 关闭。这是真实的风险提示，见上面的限制 |
+| 实例日志里的时间对不上 | 程序输出的时间用实例的时区（默认洛杉矶），SandGate 写的启动记录用 UTC，见[时区](#时区) |
 | 实例退出码 71 | SandGate 运行在另一层沙盒里。从普通终端或后台服务启动 |
 | 实例退出码 21（Chrome） | Chrome 建不了单实例锁，通常是数据目录或临时目录不可用。先用预设参数 |
 | 实例很卡、帧率很低 | 后台服务要用 `ProcessType: Interactive`，实例会继承这个级别。用当前版本重新运行 `service install` |
 | 换了 Node 版本后服务起不来 | plist 记录的是安装时的 Node 路径，重新运行 `service install` |
-| 服务重启后实例都停了 | 重启时实例会被停止，也不会自动启动，到页面上手动启动 |
+| SandGate 重启时实例断网几秒 | 实例不会退出。走闸门端口的实例现有连接会断开，约 5 秒后恢复；“跟随 Clash”的实例不受影响 |
+| 重启后实例显示“已退出”，没有退出码 | 这个实例是重启后接管的，它不是新进程的子进程，所以拿不到退出码。需要时看实例日志 |
 
 闸门的开关和原因记录在 `~/.sandgate/logs/daemon.log`，pf 服务的日志在 `/var/log/sandgate-pf.log`。
 
@@ -378,6 +389,14 @@ sudo /usr/local/sbin/sandgate-pf uninstall
 
 后台服务是用户级的 LaunchAgent，只在崩溃后自动重启。安装后 macOS 可能提示新增了后台项目，可以在「系统设置 > 通用 > 登录项与扩展」里管理。
 
+**重启 SandGate 不会终止实例。** 实例继续运行，新进程启动后核对进程号和启动时间，再重新接管。走闸门端口的实例在重启期间连不上，但只会连不上，不会走错出口。这几种情况才会停止实例：在页面上点“停止”、运行 `service uninstall`、在终端里按 Ctrl-C 退出前台运行的 SandGate。
+
+页面文件和网络配置的修改不需要重启 SandGate。只有 `src/` 下的代码更新才需要：
+
+```bash
+launchctl kickstart -k "gui/$(id -u)/com.sandgate.daemon"
+```
+
 配置项：环境变量 `SANDGATE_HOME` 可更改数据目录，实例目录会放在它旁边的 `<目录>-instances`。配置文件里的 `uiPort` 可更改网页端口，默认 7878。
 
 ## 文件位置
@@ -386,7 +405,8 @@ sudo /usr/local/sbin/sandgate-pf uninstall
 |---|---|
 | `~/.sandgate/config.json` | 配置，包括 Clash 密钥（明文） |
 | `~/.sandgate/token` | 网页登录令牌 |
-| `~/.sandgate/logs/` | `daemon.log` 是服务日志，`<实例 id>.log` 是实例日志 |
+| `~/.sandgate/logs/` | `daemon.log` 是服务日志，`<实例 id>.log` 是实例日志，超过 10 MB 时旧内容移到 `.old` |
+| `~/.sandgate/runs.json` | 运行中的实例，重启后据此接管 |
 | `~/.sandgate/profiles/` | 每个实例生成的沙盒配置（`.sb`） |
 | `~/.sandgate/pf/` | 给 pf 用的放行列表 |
 | `~/.sandgate/backups/` | 脚本扩展修改前的备份 |
