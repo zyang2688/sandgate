@@ -198,7 +198,7 @@ $('apps').addEventListener('click', async (e) => {
         clearTimeout(armedDelete.timer);
         armedDelete.id = id;
         actionInFlight = true;
-        btn.textContent = '确认删除';
+        btn.textContent = '确认删除（含数据目录）';
         armedDelete.timer = setTimeout(() => { armedDelete.id = null; actionInFlight = false; refresh(); }, 3000);
         return;
       }
@@ -259,11 +259,11 @@ const PRESETS = {
     apply(f) { f.blockBrokers.checked = true; f.allowUnixSockets.checked = false; },
   },
   chromium: {
-    note: '已加入 --proxy-server 和独立的 --user-data-dir，可以多开。Chromium 自带沙盒不能嵌套，需要 --no-sandbox，渲染进程的隔离会减弱。实例不能用钥匙串，所以加了 --use-mock-keychain，保存的密码和 Cookie 不受钥匙串保护。',
+    note: '已加入 --proxy-server 和独立的 --user-data-dir，可以多开。共用数据模式也需要这个目录，否则窗口会并入已在运行的 Chrome，不走选定的节点。Chromium 自带沙盒不能嵌套，需要 --no-sandbox，渲染进程的隔离会减弱。实例不能用钥匙串，所以加了 --use-mock-keychain，保存的密码和 Cookie 不受钥匙串保护。',
     apply(f) {
       f.blockBrokers.checked = false;
       f.allowUnixSockets.checked = true;
-      if (!f.args.value.trim()) f.args.value = '--proxy-server=socks5://127.0.0.1:{port}\n--user-data-dir={home}/profile\n--no-sandbox\n--use-mock-keychain\n--no-first-run\n--no-default-browser-check';
+      if (!f.args.value.trim()) f.args.value = '--proxy-server=socks5://127.0.0.1:{port}\n--user-data-dir={data}/profile\n--no-sandbox\n--use-mock-keychain\n--no-first-run\n--no-default-browser-check';
     },
   },
 };
@@ -276,6 +276,17 @@ function syncNetworkField() {
   f.node.required = f.network.value === 'gate';
 }
 
+const DATA_MODE_NOTES = {
+  clone: '程序看不到你的用户目录，配置、缓存和登录状态都存在实例目录里，删除实例时一起删除。程序、临时目录也和主环境分开。需要交换文件时用下面的共享文件夹。',
+  shared: '程序照常使用你的用户目录，和直接打开时一样，只有网络被隔离。.ssh、钥匙串等受保护目录仍然不可访问。',
+};
+
+function syncDataMode() {
+  const f = $('app-form');
+  $('data-mode-note').textContent = DATA_MODE_NOTES[f.dataMode.value];
+  $('shared-field').hidden = f.dataMode.value !== 'clone';
+}
+
 function fillAppForm(f, app) {
   f.name.value = app.name;
   f.command.value = app.command;
@@ -284,7 +295,8 @@ function fillAppForm(f, app) {
   f.env.value = Object.entries(app.env).map(([k, v]) => `${k}=${v}`).join('\n');
   f.network.value = app.network;
   f.node.value = app.node;
-  f.isolateHome.checked = app.isolateHome;
+  f.dataMode.value = app.isolateHome ? 'clone' : 'shared';
+  f.shared.value = (app.shared ?? []).join('\n');
   f.blockBrokers.checked = app.blockBrokers;
   f.allowUnixSockets.checked = app.allowUnixSockets;
   f.restrictWrites.checked = app.restrictWrites;
@@ -305,17 +317,17 @@ function openAppDialog(app, { duplicate = false } = {}) {
       // A second copy must not share a data directory, and usually wants another node.
       f.name.value = `${app.name} 2`;
       f.node.value = '';
-      f.isolateHome.checked = true;
       $('app-dialog-title').textContent = `再开一个：${app.name}`;
     } else {
       $('app-dialog-title').textContent = `编辑：${app.name}${app.running ? '（重启后生效）' : ''}`;
     }
   } else {
     $('app-dialog-title').textContent = '新建实例';
-    f.isolateHome.checked = true;
+    f.dataMode.value = 'clone';
     applyPreset();
   }
   syncNetworkField();
+  syncDataMode();
   $('app-dialog').showModal();
 }
 
@@ -328,6 +340,7 @@ function applyPreset() {
 
 $('app-form').preset.addEventListener('change', applyPreset);
 $('app-form').network.addEventListener('change', syncNetworkField);
+$('app-form').dataMode.addEventListener('change', syncDataMode);
 $('add-app').addEventListener('click', () => openAppDialog());
 $('app-cancel').addEventListener('click', () => $('app-dialog').close());
 
@@ -348,7 +361,8 @@ $('app-form').addEventListener('submit', async (e) => {
     env,
     network: f.network.value,
     node: f.node.value,
-    isolateHome: f.isolateHome.checked,
+    isolateHome: f.dataMode.value === 'clone',
+    shared: lines(f.shared.value),
     blockBrokers: f.blockBrokers.checked,
     allowUnixSockets: f.allowUnixSockets.checked,
     restrictWrites: f.restrictWrites.checked,

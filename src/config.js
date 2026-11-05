@@ -79,6 +79,7 @@ export function validateApp(input, existing = {}) {
     blockBrokers: input.blockBrokers !== false,
     restrictWrites: Boolean(input.restrictWrites),
     writable: pathList(input.writable, '可写路径'),
+    shared: pathList(input.shared, '共享文件夹'),
     protected: pathList(input.protected, '受保护路径'),
   };
 }
@@ -168,7 +169,7 @@ export class Store {
       cleanGate.defaultNode ||= oldNode;
       if (oldPort) cleanGate.listeners = { [oldNode]: oldPort, ...cleanGate.listeners };
     }
-    const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
+    const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, shared: [], ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
     return { ...base, ...raw, gate: cleanGate, apps };
   }
 

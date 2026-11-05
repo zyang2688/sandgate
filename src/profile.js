@@ -30,6 +30,16 @@ export function defaultProtected(sandgateDir, home = os.homedir()) {
   ];
 }
 
+const isWithin = (parent, p) => p === parent || p.startsWith(`${parent}/`);
+
+/** Directories from `root` down to `p`'s parent; empty when `p` is outside `root`. */
+function parentsWithin(root, p) {
+  if (!isWithin(root, p)) return [];
+  const out = [];
+  for (let d = path.dirname(p); isWithin(root, d); d = path.dirname(d)) out.push(d);
+  return out;
+}
+
 // System daemons that do network I/O on a caller's behalf, outside its sandbox.
 const BROKER_SERVICES = ['com.apple.nsurlsessiond', 'com.apple.coreservices.launchservicesd'];
 const MDNS_SOCKET = '/private/var/run/mDNSResponder';
@@ -38,7 +48,7 @@ const MDNS_SOCKET = '/private/var/run/mDNSResponder';
  * Builds the Seatbelt profile. SBPL is last-match-wins, so the order below is
  * load-bearing: broad denies first, narrow allows next, protected paths last.
  */
-export function buildProfile(app, { port, sandgateDir, instancesDir = '', instanceHome = '', controllerSocket = '', home = os.homedir() }) {
+export function buildProfile(app, { port, sandgateDir, instancesDir = '', instanceHome = '', controllerSocket = '', home = os.homedir(), tempDir = os.tmpdir() }) {
   const lines = ['(version 1)', '(allow default)', '', ';; network: deny everything, including DNS', '(deny network*)'];
 
   if (app.network === 'gate') {
@@ -68,9 +78,34 @@ export function buildProfile(app, { port, sandgateDir, instancesDir = '', instan
   if (instancesDir) {
     lines.push('', ';; instances cannot see each other\'s data');
     lines.push(`(deny file-read* file-write* (subpath ${sbString(canonical(instancesDir))}))`);
-    // realpath() must stat each parent, or Chrome reports its data directory as unusable.
-    if (app.isolateHome && instanceHome) lines.push(`(allow file-read-metadata (literal ${sbString(canonical(instancesDir))}))`);
-    if (app.isolateHome && instanceHome) lines.push(`(allow file-read* file-write* (subpath ${sbString(canonical(instanceHome))}))`);
+  }
+
+  const clone = app.isolateHome && instanceHome;
+  if (clone) {
+    lines.push('', ';; clone: the real home folder is invisible, and the system temp directory cannot be listed');
+    lines.push(`(deny file-read* file-write* (subpath ${sbString(canonical(home))}))`);
+    // Chrome ignores TMPDIR for its singleton socket and exits with code 21 if the system
+    // temp directory is closed, so only its listing is hidden. A clone can still open a
+    // file there if it knows the name. Without TMPDIR, os.tmpdir() is the shared /tmp.
+    if (canonical(tempDir) !== '/private/tmp') lines.push(`(deny file-read-data (literal ${sbString(canonical(tempDir))}))`);
+  }
+
+  // Paths this instance keeps. realpath() must stat each parent, or Chrome reports its
+  // data directory as unusable, so parents get metadata access and nothing more.
+  const readWrite = instanceHome ? [instanceHome] : [];
+  const readOnly = [];
+  if (clone) {
+    readWrite.push(...(app.cwd ? [app.cwd] : []), ...(app.shared ?? []), ...(app.restrictWrites ? app.writable ?? [] : []));
+    readOnly.push(app.command);
+  }
+  const kept = [...readWrite, ...readOnly].map(canonical);
+  const parents = new Set(kept.flatMap((p) => parentsWithin(canonical(home), p)));
+  if (instancesDir && instanceHome) parents.add(canonical(instancesDir));
+  if (parents.size || kept.length) lines.push('', ';; what this instance keeps');
+  for (const p of parents) lines.push(`(allow file-read-metadata (literal ${sbString(p)}))`);
+  for (const p of readWrite) lines.push(`(allow file-read* file-write* (subpath ${sbString(canonical(p))}))`);
+  for (const p of readOnly) {
+    if (isWithin(canonical(home), canonical(p))) lines.push(`(allow file-read* (subpath ${sbString(canonical(p))}))`);
   }
 
   const protectedPaths = [...defaultProtected(sandgateDir, home), ...(app.protected ?? [])];
@@ -80,11 +115,14 @@ export function buildProfile(app, { port, sandgateDir, instancesDir = '', instan
   return lines.join('\n') + '\n';
 }
 
-export const expandVars = (s, { port, home }) => s.replaceAll('{port}', String(port ?? '')).replaceAll('{home}', home ?? '');
+export const expandVars = (s, { port, home, data }) => s
+  .replaceAll('{port}', String(port ?? ''))
+  .replaceAll('{home}', home ?? '')
+  .replaceAll('{data}', data ?? '');
 
 /**
- * Child environment. NO_PROXY is removed so nothing skips the gate. An isolated
- * instance also gets its own HOME; CFFIXED_USER_HOME is the Cocoa equivalent.
+ * Child environment. NO_PROXY is removed so nothing skips the gate. A clone also gets
+ * its own HOME and temp directory; CFFIXED_USER_HOME is the Cocoa equivalent of HOME.
  */
 export function buildEnv(app, port, base = process.env, instanceHome = '') {
   const env = { ...base };
@@ -97,7 +135,7 @@ export function buildEnv(app, port, base = process.env, instanceHome = '') {
     Object.assign(env, { HTTP_PROXY: http, HTTPS_PROXY: http, ALL_PROXY: socks, http_proxy: http, https_proxy: http, all_proxy: socks });
   }
   const home = app.isolateHome && instanceHome ? instanceHome : '';
-  if (home) Object.assign(env, { HOME: home, CFFIXED_USER_HOME: home });
-  for (const [k, v] of Object.entries(app.env ?? {})) env[k] = expandVars(v, { port, home: home || base.HOME });
+  if (home) Object.assign(env, { HOME: home, CFFIXED_USER_HOME: home, TMPDIR: path.join(home, 'tmp') });
+  for (const [k, v] of Object.entries(app.env ?? {})) env[k] = expandVars(v, { port, home: home || base.HOME, data: instanceHome });
   return env;
 }

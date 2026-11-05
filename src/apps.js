@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { GatePort } from './gateport.js';
@@ -114,14 +115,14 @@ export class AppManager {
     const profile = this.#writeProfile(app);
     const command = await resolveCommand(app.command);
     const home = this.store.instanceHome(id);
-    if (app.isolateHome) fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-    const vars = { port: app.port, home: app.isolateHome ? home : process.env.HOME };
+    this.#prepareDataDir(app);
+    const vars = { port: app.port, home: app.isolateHome ? home : process.env.HOME, data: home };
     const args = app.args.map((a) => expandVars(a, vars));
     const log = new LogFile(path.join(this.store.logDir, `${id}.log`));
     log.write(Buffer.from(`\n=== ${new Date().toISOString()} start ${command} ===\n`));
 
     const child = spawn(SANDBOX_EXEC, ['-f', profile, command, ...args], {
-      cwd: app.cwd || undefined,
+      cwd: app.cwd || (app.isolateHome ? home : undefined),
       env: buildEnv(app, app.port, process.env, home),
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true, // own process group, so stop reaches every descendant
@@ -154,7 +155,15 @@ export class AppManager {
     try { process.kill(-run.child.pid, sig); } catch { /* already gone */ }
   }
 
-  /** Removes the definition. The instance's data directory is left for the user to delete. */
+  /** A shared-data instance gets a directory only if it asks for one through {data}. */
+  #prepareDataDir(app) {
+    const home = this.store.instanceHome(app.id);
+    const usesData = [...app.args, ...Object.values(app.env)].some((v) => v.includes('{data}'));
+    if (app.isolateHome || usesData) fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+    if (app.isolateHome) fs.mkdirSync(path.join(home, 'tmp'), { recursive: true, mode: 0o700 });
+  }
+
+  /** Removes the definition along with the instance's data directory. */
   async remove(id) {
     if (this.runs.has(id)) throw new Error('请先停止应用');
     await this.releasePort(id);
@@ -164,6 +173,11 @@ export class AppManager {
     apps.splice(i, 1);
     this.store.save();
     fs.rmSync(path.join(this.store.profileDir, `${id}.sb`), { force: true });
+    try {
+      fs.rmSync(this.store.instanceHome(id), { recursive: true, force: true });
+    } catch (e) {
+      throw new Error(`实例已删除，但数据目录没能删除：${e.message}`);
+    }
   }
 
   async releasePort(id) {
@@ -196,6 +210,8 @@ export class AppManager {
     await this.#ensurePort(app);
     const profile = this.#writeProfile(app);
     const gateOpen = this.gates.isOpen(app.node);
+    this.#prepareDataDir(app);
+    const writeProbe = path.join(os.homedir(), `.sandgate-probe-${id}`);
     const runInBox = async (cmd, ...args) => {
       try {
         const { stderr } = await exec(SANDBOX_EXEC, ['-f', profile, cmd, ...args], { timeout: 15000, env: buildEnv({ ...app, network: 'none', isolateHome: false, env: {} }, null) });
@@ -221,7 +237,14 @@ export class AppManager {
       ['udp', 'UDP 发往 223.5.5.5:53', '/usr/bin/nc', '-u', '-z', '-w', '2', '223.5.5.5', '53'],
       ['broker', '系统网络框架 (nscurl)', NSCURL, 'https://www.apple.com'],
       ['token', '读取 SandGate 令牌', '/bin/cat', this.store.tokenPath],
+      ['peers', '列出其他实例的目录', '/bin/ls', this.store.instancesDir],
     ];
+    if (app.isolateHome) {
+      denials.push(
+        ['real-home', '读取真实用户目录', '/bin/ls', os.homedir()],
+        ['real-home-write', '写入真实用户目录', '/usr/bin/touch', writeProbe],
+      );
+    }
     const listener = this.store.data.gate.listeners[app.node];
     if (listener) {
       denials.push(['listener', `绕过闸门直连 listener ${listener}`, '/usr/bin/curl', ...curl, '-x', `http://127.0.0.1:${listener}`, 'http://cp.cloudflare.com/generate_204']);
@@ -232,6 +255,7 @@ export class AppManager {
       const blocked = cmd === NSCURL ? nscurlBlocked(code, stderr) : code !== 0;
       results.push({ id: pid, label, ok: blocked, detail: blocked ? `已拦截 (退出码 ${code})` : '泄漏：操作成功了' });
     }
+    fs.rmSync(writeProbe, { force: true });
     if (app.network === 'gate') {
       const code = await inBox('/usr/bin/curl', ...curl, '-x', `http://127.0.0.1:${app.port}`, 'http://cp.cloudflare.com/generate_204');
       results.push({

@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
-import { nscurlBlocked } from '../src/apps.js';
+import { AppManager, nscurlBlocked } from '../src/apps.js';
 import { detectVerge, listenerSnippet, ClashClient } from '../src/clash.js';
 import { Store, ValidationError, expandPath, mergeGateSettings, validateApp, DEFAULT_SETTINGS } from '../src/config.js';
 import { Sandgate } from '../src/daemon.js';
@@ -630,8 +630,116 @@ describe('instance isolation', () => {
     assert.ok(p.indexOf('(deny file-read* file-write* (subpath "/Users/t/.sandgate"))') > allow);
   });
 
-  test('without isolation the instance sees no instance data at all', () => {
-    assert.doesNotMatch(buildProfile(app({ isolateHome: false }), opts), /allow file-read\*/);
+  describe('shared data', () => {
+    const p = buildProfile(app({ isolateHome: false }), opts);
+
+    test('leaves the home folder and temp directory visible', () => {
+      assert.doesNotMatch(p, /subpath "\/Users\/t"\)/);
+      assert.equal(buildEnv(app({ isolateHome: false }), 17900, { HOME: '/Users/t', TMPDIR: '/t/' }, '/inst/abc').TMPDIR, '/t/');
+    });
+
+    test('still hides other instances and protected paths', () => {
+      assert.ok(p.includes('(deny file-read* file-write* (subpath "/Users/t/.sandgate-instances"))'));
+      assert.ok(p.includes('(deny file-read* file-write* (subpath "/Users/t/.ssh"))'));
+    });
+
+    test('{data} still points at the instance directory, so Chrome gets its own profile', () => {
+      const env = buildEnv(app({ isolateHome: false, env: { D: '{data}/x', H: '{home}/y' } }), 17900, { HOME: '/Users/t' }, '/inst/abc');
+      assert.equal(env.D, '/inst/abc/x');
+      assert.equal(env.H, '/Users/t/y');
+    });
+  });
+
+  describe('clone', () => {
+    const cloneOpts = { ...opts, tempDir: '/nonexistent/T' };
+    const deny = (x) => `(deny file-read* file-write* (subpath "${x}"))`;
+    const rw = (x) => `(allow file-read* file-write* (subpath "${x}"))`;
+    const meta = (x) => `(allow file-read-metadata (literal "${x}"))`;
+
+    test('hides the real home folder, and lists nothing in the system temp directory', () => {
+      const p = buildProfile(app(), cloneOpts);
+      assert.ok(p.includes(deny('/Users/t')));
+      assert.ok(p.includes('(deny file-read-data (literal "/nonexistent/T"))'));
+      assert.ok(!p.includes(deny('/nonexistent/T')), 'Chrome exits with code 21 if it cannot create its singleton socket here');
+    });
+
+    test('keeps its own directory, with only metadata on the parents', () => {
+      const p = buildProfile(app(), cloneOpts);
+      assert.ok(p.indexOf(rw('/Users/t/.sandgate-instances/abc')) > p.indexOf(deny('/Users/t')));
+      assert.ok(p.indexOf(meta('/Users/t')) > p.indexOf(deny('/Users/t')));
+      assert.ok(p.includes(meta('/Users/t/.sandgate-instances')));
+      assert.doesNotMatch(p, /file-read\* file-write\* \(subpath "\/Users\/t\/\.sandgate-instances"\)\)\n\(allow/, 'parents are never opened');
+    });
+
+    test('shared folders and the working directory stay reachable', () => {
+      const p = buildProfile(app({ shared: ['/Users/t/Downloads/x'], cwd: '/Users/t/work' }), cloneOpts);
+      for (const d of ['/Users/t/Downloads/x', '/Users/t/work']) assert.ok(p.indexOf(rw(d)) > p.indexOf(deny('/Users/t')), d);
+      assert.ok(p.includes(meta('/Users/t/Downloads')));
+    });
+
+    test('a protected path wins over a shared folder', () => {
+      const p = buildProfile(app({ shared: ['/Users/t/.ssh'] }), cloneOpts);
+      assert.ok(p.lastIndexOf(deny('/Users/t/.ssh')) > p.indexOf(rw('/Users/t/.ssh')));
+    });
+
+    test('a program inside the home folder can run but not be written to', () => {
+      const p = buildProfile(app({ command: '/Users/t/Applications/Foo.app' }), cloneOpts);
+      assert.ok(p.includes('(allow file-read* (subpath "/Users/t/Applications/Foo.app"))'));
+      assert.ok(!p.includes(rw('/Users/t/Applications/Foo.app')));
+      assert.doesNotMatch(buildProfile(app({ command: '/Applications/Foo.app' }), cloneOpts), /allow file-read\* \(subpath "\/Applications/);
+    });
+
+    test('writable paths reopen only when writes are restricted', () => {
+      assert.ok(!buildProfile(app({ writable: ['/Users/t/w'] }), cloneOpts).includes(rw('/Users/t/w')));
+      assert.ok(buildProfile(app({ writable: ['/Users/t/w'], restrictWrites: true }), cloneOpts).includes(rw('/Users/t/w')));
+    });
+
+    test('gets its own HOME and temp directory', () => {
+      const env = buildEnv(app(), 17900, { HOME: '/Users/t', TMPDIR: '/t/' }, '/inst/abc');
+      assert.equal(env.TMPDIR, '/inst/abc/tmp');
+      assert.equal(env.HOME, '/inst/abc');
+    });
+  });
+
+  describe('deleting an instance', () => {
+    const setup = () => {
+      const store = new Store(path.join(tmp(), 'data'));
+      const manager = new AppManager({ store, gates: { on() {}, isOpen: () => false }, controllerSocket: () => '' });
+      const add = (over = {}) => {
+        const a = validateApp({ name: 'x', command: '/bin/ls', network: 'none', ...over });
+        store.data.apps.push(a);
+        return a;
+      };
+      return { store, manager, add };
+    };
+
+    test('removes its directory and nothing else', async () => {
+      const { store, manager, add } = setup();
+      const [a, b] = [add(), add()];
+      for (const x of [a, b]) {
+        fs.mkdirSync(path.join(store.instanceHome(x.id), 'profile'), { recursive: true });
+        fs.writeFileSync(path.join(store.instanceHome(x.id), 'profile/f'), 'x');
+      }
+      await manager.remove(a.id);
+      assert.equal(fs.existsSync(store.instanceHome(a.id)), false);
+      assert.equal(fs.readFileSync(path.join(store.instanceHome(b.id), 'profile/f'), 'utf8'), 'x');
+    });
+
+    test('does not follow symlinks out of the directory', async () => {
+      const { store, manager, add } = setup();
+      const a = add();
+      const outside = tmp();
+      fs.writeFileSync(path.join(outside, 'keep'), 'x');
+      fs.mkdirSync(store.instanceHome(a.id));
+      fs.symlinkSync(outside, path.join(store.instanceHome(a.id), 'link'));
+      await manager.remove(a.id);
+      assert.equal(fs.readFileSync(path.join(outside, 'keep'), 'utf8'), 'x');
+    });
+
+    test('works when the instance never had a directory', async () => {
+      const { manager, add } = setup();
+      await manager.remove(add({ isolateHome: false }).id);
+    });
   });
 
   test('HOME moves only for an isolated instance; {home} and {port} expand', () => {
