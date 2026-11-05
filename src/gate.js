@@ -43,9 +43,10 @@ export async function fetchExitIp(upstreamPort, url) {
  * Opens a real tunnel through the listener and asks mihomo which proxy carries it.
  * This catches a mis-set listener or a port now serving a different node.
  */
-export async function verifyPin({ upstreamPort, probeUrl, node, client }) {
+export async function verifyPin({ upstreamPort, probeUrl, node, client, findTimeoutMs = 6000 }) {
   const { hostname, port, protocol } = new URL(probeUrl);
   const authority = `${hostname}:${port || (protocol === 'https:' ? 443 : 80)}`;
+  const started = Date.now();
   const sock = net.connect({ host: '127.0.0.1', port: upstreamPort });
   try {
     await new Promise((resolve, reject) => {
@@ -63,7 +64,10 @@ export async function verifyPin({ upstreamPort, probeUrl, node, client }) {
       });
     });
     const localPort = String(sock.localPort);
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // mihomo answers CONNECT at once but lists the connection only after dialing, which
+    // takes about 1.8 s for a chained node. The search must also end within the check's 9 s.
+    const deadline = Date.now() + Math.min(findTimeoutMs, 9000 - (Date.now() - started) - 500);
+    while (Date.now() < deadline) {
       const { connections = [] } = await client.connections();
       const conn = connections.find((c) => String(c.metadata?.sourcePort) === localPort);
       if (conn) {

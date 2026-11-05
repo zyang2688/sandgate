@@ -6,6 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
+import { nscurlBlocked } from '../src/apps.js';
 import { detectVerge, listenerSnippet, ClashClient } from '../src/clash.js';
 import { Store, ValidationError, expandPath, mergeGateSettings, validateApp, DEFAULT_SETTINGS } from '../src/config.js';
 import { Sandgate } from '../src/daemon.js';
@@ -286,6 +287,29 @@ describe('Clash integration (fake mihomo)', () => {
       upstream.close();
       controller.close();
     }
+  });
+
+  // A chained node took about 1.8 s to dial on a real mihomo, after CONNECT was answered.
+  test('verifyPin waits for a connection that is listed only after dialing', async () => {
+    const { upstream, controller } = fakeMihomo({ via: 'node-a' });
+    const upstreamPort = await listen(upstream);
+    const port = await listen(controller);
+    const real = new ClashClient({ type: 'tcp', host: '127.0.0.1', port, secret: 'sekret' });
+    const started = Date.now();
+    const client = { connections: () => (Date.now() - started < 2000 ? { connections: [] } : real.connections()) };
+    assert.match(await verifyPin({ upstreamPort, probeUrl: 'http://cp.example/x', node: 'node-a', client }), /node-a/);
+    assert.ok(Date.now() - started >= 2000);
+    upstream.close();
+    controller.close();
+  });
+
+  test('verifyPin gives up when the connection never appears', async () => {
+    const { upstream, controller } = fakeMihomo({ via: 'node-a' });
+    const upstreamPort = await listen(upstream);
+    const client = { connections: () => ({ connections: [] }) };
+    await assert.rejects(verifyPin({ upstreamPort, probeUrl: 'http://cp.example/x', node: 'node-a', client, findTimeoutMs: 300 }), /找不到探测连接/);
+    upstream.close();
+    controller.close();
   });
 
   test('proxies() omits builtins and server addresses; a bad secret is reported', async () => {
@@ -600,6 +624,8 @@ describe('instance isolation', () => {
     const p = buildProfile(app(), opts);
     const deny = p.indexOf('(deny file-read* file-write* (subpath "/Users/t/.sandgate-instances"))');
     const allow = p.indexOf('(allow file-read* file-write* (subpath "/Users/t/.sandgate-instances/abc"))');
+    assert.ok(p.indexOf('(allow file-read-metadata (literal "/Users/t/.sandgate-instances"))') > deny, 'realpath needs to stat the parent, or Chrome rejects its data directory');
+    assert.doesNotMatch(p, /allow file-read-metadata \(subpath/, 'only the parent itself, not its contents');
     assert.ok(deny > 0 && allow > deny, 'last match wins, so the allow must follow the deny');
     assert.ok(p.indexOf('(deny file-read* file-write* (subpath "/Users/t/.sandgate"))') > allow);
   });
@@ -1313,5 +1339,15 @@ describe('real sandbox-exec', { skip: canSandbox ? false : 'sandbox-exec unavail
     assert.notEqual(await nc(deniedPort), 0);
     allowed.close();
     denied.close();
+  });
+});
+
+describe('leak self-test', () => {
+  test('nscurl counts as blocked only with a failure message, since it always exits 0', () => {
+    const denied = 'Load failed with error: Error Domain=NSPOSIXErrorDomain Code=1 "Operation not permitted"';
+    assert.equal(nscurlBlocked(0, denied), true);
+    assert.equal(nscurlBlocked(0, ''), false, 'a successful load prints nothing on stderr');
+    assert.equal(nscurlBlocked(0, 'some new error format'), false, 'an unknown format raises an alarm');
+    assert.equal(nscurlBlocked(71, ''), true);
   });
 });

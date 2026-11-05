@@ -6,6 +6,15 @@ import { GatePort } from './gateport.js';
 import { buildEnv, buildProfile, expandVars } from './profile.js';
 
 const exec = promisify(execFile);
+const NSCURL = '/usr/bin/nscurl';
+
+/**
+ * nscurl exits 0 even when the load fails and reports the failure only on stderr.
+ * Anything without that message counts as a leak, so an unknown format raises an alarm.
+ */
+export function nscurlBlocked(code, stderr) {
+  return code !== 0 || stderr.includes('Load failed');
+}
 const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 const LOG_LIMIT = 10 * 1024 * 1024;
 const TAIL_BYTES = 64 * 1024;
@@ -187,14 +196,15 @@ export class AppManager {
     await this.#ensurePort(app);
     const profile = this.#writeProfile(app);
     const gateOpen = this.gates.isOpen(app.node);
-    const inBox = async (cmd, ...args) => {
+    const runInBox = async (cmd, ...args) => {
       try {
-        await exec(SANDBOX_EXEC, ['-f', profile, cmd, ...args], { timeout: 15000, env: buildEnv({ ...app, network: 'none', isolateHome: false, env: {} }, null) });
-        return 0;
+        const { stderr } = await exec(SANDBOX_EXEC, ['-f', profile, cmd, ...args], { timeout: 15000, env: buildEnv({ ...app, network: 'none', isolateHome: false, env: {} }, null) });
+        return { code: 0, stderr };
       } catch (e) {
-        return typeof e.code === 'number' ? e.code : -1;
+        return { code: typeof e.code === 'number' ? e.code : -1, stderr: String(e.stderr ?? '') };
       }
     };
+    const inBox = async (cmd, ...args) => (await runInBox(cmd, ...args)).code;
 
     const applied = await inBox('/usr/bin/true');
     if (applied !== 0) {
@@ -209,7 +219,7 @@ export class AppManager {
       ['direct-ip', '直连公网 IP', '/usr/bin/curl', ...curl, '--noproxy', '*', 'https://223.5.5.5'],
       ['direct-dns', '直连域名（含本地 DNS）', '/usr/bin/curl', ...curl, '--noproxy', '*', 'https://www.baidu.com'],
       ['udp', 'UDP 发往 223.5.5.5:53', '/usr/bin/nc', '-u', '-z', '-w', '2', '223.5.5.5', '53'],
-      ['broker', '系统网络框架 (nscurl)', '/usr/bin/nscurl', 'https://www.apple.com'],
+      ['broker', '系统网络框架 (nscurl)', NSCURL, 'https://www.apple.com'],
       ['token', '读取 SandGate 令牌', '/bin/cat', this.store.tokenPath],
     ];
     const listener = this.store.data.gate.listeners[app.node];
@@ -218,8 +228,9 @@ export class AppManager {
     }
     const results = [{ id: 'applied', label: '沙盒配置能否加载', ok: true, detail: '已加载' }];
     for (const [pid, label, cmd, ...args] of denials) {
-      const code = await inBox(cmd, ...args);
-      results.push({ id: pid, label, ok: code !== 0, detail: code !== 0 ? `已拦截 (退出码 ${code})` : '泄漏：操作成功了' });
+      const { code, stderr } = await runInBox(cmd, ...args);
+      const blocked = cmd === NSCURL ? nscurlBlocked(code, stderr) : code !== 0;
+      results.push({ id: pid, label, ok: blocked, detail: blocked ? `已拦截 (退出码 ${code})` : '泄漏：操作成功了' });
     }
     if (app.network === 'gate') {
       const code = await inBox('/usr/bin/curl', ...curl, '-x', `http://127.0.0.1:${app.port}`, 'http://cp.cloudflare.com/generate_204');

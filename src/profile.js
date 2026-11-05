@@ -68,6 +68,8 @@ export function buildProfile(app, { port, sandgateDir, instancesDir = '', instan
   if (instancesDir) {
     lines.push('', ';; instances cannot see each other\'s data');
     lines.push(`(deny file-read* file-write* (subpath ${sbString(canonical(instancesDir))}))`);
+    // realpath() must stat each parent, or Chrome reports its data directory as unusable.
+    if (app.isolateHome && instanceHome) lines.push(`(allow file-read-metadata (literal ${sbString(canonical(instancesDir))}))`);
     if (app.isolateHome && instanceHome) lines.push(`(allow file-read* file-write* (subpath ${sbString(canonical(instanceHome))}))`);
   }
 
