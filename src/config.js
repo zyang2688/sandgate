@@ -47,6 +47,20 @@ const pathList = (v, label) => {
 };
 
 /** Normalises untrusted API input into a stored sandbox instance. */
+export const DEFAULT_TIMEZONE = 'America/Los_Angeles';
+
+/** Empty means the system time zone. Intl rejects any name the runtime cannot resolve. */
+function validTimezone(v) {
+  const tz = String(v ?? '').trim();
+  if (!tz) return '';
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: tz });
+  } catch {
+    fail(`时区无效: ${tz}，例如 America/Los_Angeles`);
+  }
+  return tz;
+}
+
 export function validateApp(input, existing = {}) {
   const name = String(input.name ?? '').trim();
   if (!name || name.length > 64 || hasControl(name)) fail('名称需为 1-64 个字符');
@@ -71,6 +85,7 @@ export function validateApp(input, existing = {}) {
     args,
     cwd: input.cwd ? expandPath(input.cwd) : '',
     env,
+    timezone: validTimezone(input.timezone ?? existing.timezone ?? DEFAULT_TIMEZONE),
     network,
     node: network === 'gate' ? node : '',
     port: existing.port ?? null,
@@ -169,7 +184,7 @@ export class Store {
       cleanGate.defaultNode ||= oldNode;
       if (oldPort) cleanGate.listeners = { [oldNode]: oldPort, ...cleanGate.listeners };
     }
-    const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, shared: [], ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
+    const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, shared: [], timezone: '', ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
     return { ...base, ...raw, gate: cleanGate, apps };
   }
 

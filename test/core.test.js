@@ -12,7 +12,7 @@ import { Store, ValidationError, expandPath, mergeGateSettings, validateApp, DEF
 import { Sandgate } from '../src/daemon.js';
 import { GateManager, GateMonitor, PinMismatch, decide, verifyPin } from '../src/gate.js';
 import { GatePort } from '../src/gateport.js';
-import { ConnectionGuard, findViolations, rulesFingerprint } from '../src/guard.js';
+import { ConnectionGuard, findViolations, rulesFingerprint, ipv6Check, modeWarning } from '../src/guard.js';
 import { PfPlanner, parseCidrList, parseClashConfig, resolveTargets } from '../src/pfplan.js';
 import { buildEnv, buildProfile, expandVars, sbString } from '../src/profile.js';
 import { ServiceManager, buildPlist, startMessage } from '../src/service.js';
@@ -784,6 +784,40 @@ describe('instance isolation', () => {
     });
   });
 
+  describe('time zone', () => {
+    const base = { HOME: '/Users/t', TZ: 'Asia/Singapore' };
+
+    test('new instances default to Los Angeles, and it reaches the child', () => {
+      assert.equal(app().timezone, 'America/Los_Angeles');
+      assert.equal(buildEnv(app(), 17900, base, '/inst/abc').TZ, 'America/Los_Angeles');
+    });
+
+    test('can be chosen, changed later, and kept by an edit that omits it', () => {
+      const first = app({ timezone: 'Asia/Tokyo' });
+      assert.equal(first.timezone, 'Asia/Tokyo');
+      assert.equal(validateApp({ name: 'x', command: '/bin/ls', node: 'n', timezone: 'Asia/Singapore' }, first).timezone, 'Asia/Singapore');
+      assert.equal(validateApp({ name: 'x', command: '/bin/ls', node: 'n' }, first).timezone, 'Asia/Tokyo');
+    });
+
+    test('empty follows the system', () => {
+      assert.equal(buildEnv(app({ timezone: '' }), 17900, base, '/inst/abc').TZ, 'Asia/Singapore');
+    });
+
+    test('an explicit TZ in the environment field wins', () => {
+      assert.equal(buildEnv(app({ env: { TZ: 'UTC' } }), 17900, base, '/inst/abc').TZ, 'UTC');
+    });
+
+    test('rejects a name that is not a time zone', () => {
+      assert.throws(() => app({ timezone: 'Mars/Olympus' }), /时区无效/);
+    });
+
+    test('instances saved before this field keep the system zone', () => {
+      const dir = tmp();
+      fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ apps: [{ id: 'a', name: 'a', command: '/bin/ls', args: [], network: 'none' }] }));
+      assert.equal(new Store(dir).data.apps[0].timezone, '');
+    });
+  });
+
   describe('deleting an instance', () => {
     const setup = () => {
       const store = new Store(path.join(tmp(), 'data'));
@@ -1530,6 +1564,49 @@ describe('real sandbox-exec', { skip: canSandbox ? false : 'sandbox-exec unavail
     assert.notEqual(await nc(deniedPort), 0);
     allowed.close();
     denied.close();
+  });
+});
+
+describe('Clash mode and IPv6 checks', () => {
+  test('only rule mode is quiet', () => {
+    assert.equal(modeWarning('rule'), '');
+    assert.equal(modeWarning(undefined), '');
+    assert.match(modeWarning('direct'), /direct 模式/);
+    assert.match(modeWarning('global'), /global 模式/);
+    assert.match(modeWarning('other'), /other 模式/);
+  });
+
+  test('says IPv6 is blocked when pf is working, whatever Clash has set', () => {
+    for (const clash of [true, false]) {
+      const r = ipv6Check('protected', clash);
+      assert.equal(r.status, 'ok');
+      assert.match(r.detail, /已拦截公网 IPv6/);
+    }
+  });
+
+  test('warns when pf is off or unknown, and never claims a block', () => {
+    for (const state of ['exposed', 'unknown', undefined]) {
+      const r = ipv6Check(state, true);
+      assert.equal(r.status, 'warn');
+      assert.doesNotMatch(r.detail, /已拦截/);
+    }
+  });
+
+  test('the final pf rule has no address family, so it also drops IPv6', () => {
+    const rules = execFileSync('/bin/bash', [path.join(import.meta.dirname, '../scripts/sandgate-pf.sh'), 'render', 'en0'], { encoding: 'utf8' });
+    assert.match(rules, /^block drop out quick on en0 all$/m);
+  });
+
+  test('the guard reports a mode change and clears it again', async () => {
+    let mode = 'direct';
+    const client = { connections: async () => ({ connections: [] }), rules: async () => ({ rules: [] }), configs: async () => ({ mode }) };
+    const guard = new ConnectionGuard({ client, getSettings: () => ({ defaultNode: '', listeners: {}, rulesHash: '' }), saveRulesHash() {} });
+    await guard.tick();
+    assert.match(guard.status.modeWarning, /direct/);
+    mode = 'rule';
+    await guard.tick();
+    assert.equal(guard.status.modeWarning, '');
+    assert.equal(guard.status.active, true);
   });
 });
 

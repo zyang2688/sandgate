@@ -32,6 +32,7 @@
         <div id="protection-title" class="status-title">全机防护</div>
         <div id="protection-detail" class="muted"></div>
         <div id="guard-detail" class="muted"></div>
+        <div id="mode-alert" class="row alert" hidden></div>
         <div id="rules-alert" class="row alert" hidden>
           <span>Clash 规则已变化，可能有流量改走直连。请确认是你改的。</span>
           <button id="accept-rules" class="btn small">确认无误</button>
@@ -163,6 +164,19 @@
       <label id="node-field">节点（所有流量都走它，不按 Clash 规则分流）
         <input name="node" list="node-list" spellcheck="false">
       </label>
+      <label>时区（留空跟随系统。程序自己读取时区时才生效，建议和节点所在地一致）
+        <input name="timezone" list="timezone-list" spellcheck="false">
+      </label>
+      <datalist id="timezone-list">
+        <option value="America/Los_Angeles"></option>
+        <option value="America/New_York"></option>
+        <option value="Asia/Singapore"></option>
+        <option value="Asia/Tokyo"></option>
+        <option value="Asia/Hong_Kong"></option>
+        <option value="Asia/Taipei"></option>
+        <option value="Europe/London"></option>
+        <option value="Europe/Frankfurt"></option>
+      </datalist>
       <label>数据环境
         <select name="dataMode">
           <option value="clone">独立数据（分身）</option>

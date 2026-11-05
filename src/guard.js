@@ -24,6 +24,28 @@ export function findViolations(connections, { defaultNode, listeners }) {
   });
 }
 
+const MODE_WARNINGS = {
+  direct: 'Clash 是 direct 模式：所有流量都直连，国外网站会被 pf 拦住，国内网站看到的是真实 IP。',
+  global: 'Clash 是 global 模式：不再按规则分流，所有流量都走 GLOBAL 组当前选的出口。',
+};
+
+/** Empty for rule mode, which is what the whole-Mac protection assumes. */
+export function modeWarning(mode) {
+  if (!mode || mode === 'rule') return '';
+  return MODE_WARNINGS[mode] ?? `Clash 是 ${mode} 模式，不再按规则分流。`;
+}
+
+/**
+ * pf's final rule on each physical NIC has no address family, so it also drops public
+ * IPv6. Its effect is taken from the protection probe, which tests over IPv4.
+ */
+export function ipv6Check(protection, clashIpv6) {
+  const clash = `Clash 的 IPv6 ${clashIpv6 ? '已开启' : '已关闭'}`;
+  if (protection === 'protected') return { status: 'ok', detail: `物理网卡已拦截公网 IPv6。${clash}。` };
+  if (protection === 'exposed') return { status: 'warn', detail: `pf 未生效，物理网卡没有拦截 IPv6。${clash}。` };
+  return { status: 'warn', detail: `还不能确认物理网卡是否拦截了 IPv6，全机防护状态未知。${clash}。` };
+}
+
 const FINGERPRINT_VERSION = 'v2:';
 
 /**
@@ -44,7 +66,7 @@ export function rulesFingerprint({ rules = [] }) {
 export class ConnectionGuard {
   constructor({ client, getSettings, saveRulesHash, intervalMs = 2000 }) {
     Object.assign(this, { client, getSettings, saveRulesHash, intervalMs });
-    this.status = { active: false, error: '尚未检查', killed: 0, recent: [], rulesChanged: false };
+    this.status = { active: false, error: '尚未检查', killed: 0, recent: [], rulesChanged: false, modeWarning: '' };
   }
 
   start() {
@@ -78,10 +100,12 @@ export class ConnectionGuard {
       // A baseline from an older fingerprint format says nothing about the current rules.
       if (!g.rulesHash?.startsWith(FINGERPRINT_VERSION)) this.saveRulesHash(hash);
       this.status.rulesChanged = g.rulesHash?.startsWith(FINGERPRINT_VERSION) === true && hash !== g.rulesHash;
+      this.status.modeWarning = modeWarning((await this.client.configs()).mode);
       this.status.active = true;
       this.status.error = '';
     } catch (e) {
       this.status.active = false;
+      this.status.modeWarning = '';
       this.status.error = e.message;
     } finally {
       this.running = false;

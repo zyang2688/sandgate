@@ -9,7 +9,7 @@ import { AppManager } from './apps.js';
 import { ClashClient, ClashError, detectVerge, listenerSnippet } from './clash.js';
 import { Store, ValidationError, mergeGateSettings, validateApp } from './config.js';
 import { GateManager, defaultRouteInterface, fetchExitIp, tcpProbe } from './gate.js';
-import { ConnectionGuard, ProtectionProbe } from './guard.js';
+import { ConnectionGuard, ProtectionProbe, ipv6Check, modeWarning } from './guard.js';
 import { PfPlanner } from './pfplan.js';
 
 const exec = promisify(execFile);
@@ -325,6 +325,10 @@ export class Sandgate {
       const { version } = await this.client.version();
       cfg = await this.client.configs();
       add('controller', 'Clash 控制接口', 'ok', `${version}，${cfg.mode} 模式，TUN ${cfg.tun?.enable ? '已开启' : '未开启'}`);
+      const warning = modeWarning(cfg.mode);
+      add('mode', 'Clash 模式', warning ? 'warn' : 'ok', warning || 'rule 模式，按规则分流');
+      const ipv6 = ipv6Check(this.protection.status.state, Boolean(cfg.ipv6));
+      add('ipv6', 'IPv6', ipv6.status, ipv6.detail);
     } catch (e) {
       add('controller', 'Clash 控制接口', 'fail', `${e.message}。可在 Clash Verge 的设置中开启外部控制，再点「从 Clash Verge 读取」。`);
     }

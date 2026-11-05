@@ -136,6 +136,7 @@ export function buildEnv(app, port, base = process.env, instanceHome = '') {
   }
   const home = app.isolateHome && instanceHome ? instanceHome : '';
   if (home) Object.assign(env, { HOME: home, CFFIXED_USER_HOME: home, TMPDIR: path.join(home, 'tmp') });
+  if (app.timezone) env.TZ = app.timezone; // set before app.env, so an explicit TZ there still wins
   for (const [k, v] of Object.entries(app.env ?? {})) env[k] = expandVars(v, { port, home: home || base.HOME, data: instanceHome });
   return env;
 }

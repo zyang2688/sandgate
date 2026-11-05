@@ -77,6 +77,8 @@ function renderProtection(p, guard) {
     ? `连接守卫运行中，已断开 ${guard.killed} 条走错节点的连接${guard.recent[0] ? `（最近：${guard.recent[0].host} 经 ${guard.recent[0].via}）` : ''}`
     : `连接守卫未运行：${guard.error}`;
   $('rules-alert').hidden = !guard.rulesChanged;
+  $('mode-alert').hidden = !guard.modeWarning;
+  $('mode-alert').textContent = guard.modeWarning ?? '';
 }
 
 function renderGates({ locked, nodes }) {
@@ -263,7 +265,7 @@ const PRESETS = {
     apply(f) {
       f.blockBrokers.checked = false;
       f.allowUnixSockets.checked = true;
-      if (!f.args.value.trim()) f.args.value = '--proxy-server=socks5://127.0.0.1:{port}\n--user-data-dir={data}/profile\n--no-sandbox\n--use-mock-keychain\n--no-first-run\n--no-default-browser-check';
+      if (!f.args.value.trim()) f.args.value = '--proxy-server=socks5://127.0.0.1:{port}\n--user-data-dir={data}/profile\n--no-sandbox\n--use-mock-keychain\n--no-first-run\n--no-default-browser-check\n--lang=en-US\n--force-webrtc-ip-handling-policy=disable_non_proxied_udp';
     },
   },
 };
@@ -295,6 +297,7 @@ function fillAppForm(f, app) {
   f.env.value = Object.entries(app.env).map(([k, v]) => `${k}=${v}`).join('\n');
   f.network.value = app.network;
   f.node.value = app.node;
+  f.timezone.value = app.timezone ?? '';
   f.dataMode.value = app.isolateHome ? 'clone' : 'shared';
   f.shared.value = (app.shared ?? []).join('\n');
   f.blockBrokers.checked = app.blockBrokers;
@@ -324,6 +327,7 @@ function openAppDialog(app, { duplicate = false } = {}) {
   } else {
     $('app-dialog-title').textContent = '新建实例';
     f.dataMode.value = 'clone';
+    f.timezone.value = 'America/Los_Angeles';
     applyPreset();
   }
   syncNetworkField();
@@ -361,6 +365,7 @@ $('app-form').addEventListener('submit', async (e) => {
     env,
     network: f.network.value,
     node: f.node.value,
+    timezone: f.timezone.value.trim(),
     isolateHome: f.dataMode.value === 'clone',
     shared: lines(f.shared.value),
     blockBrokers: f.blockBrokers.checked,
