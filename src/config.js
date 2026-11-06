@@ -124,8 +124,8 @@ export function validateApp(input, existing = {}) {
     isolateHome,
     // A clone whose HOME is its own while your files stay reachable: separate accounts, same projects.
     homeVisible: isolateHome && Boolean(input.homeVisible ?? existing.homeVisible),
-    // Only a clone that sees your home can reach what the links point to.
-    linkedPaths: isolateHome && Boolean(input.homeVisible ?? existing.homeVisible) ? homeRelativeList(input.linkedPaths ?? existing.linkedPaths) : [],
+    // Only an instance that sees your home can reach what the links point to.
+    linkedPaths: !unsandboxed && (!isolateHome || Boolean(input.homeVisible ?? existing.homeVisible)) ? homeRelativeList(input.linkedPaths ?? existing.linkedPaths) : [],
     alias,
     allowUnixSockets: Boolean(input.allowUnixSockets),
     blockBrokers: input.blockBrokers !== false,

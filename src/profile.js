@@ -93,13 +93,12 @@ export function buildProfile(app, { port, sandgateDir, instancesDir = '', instan
   }
 
   const clone = app.isolateHome && instanceHome;
-  if (clone) {
-    // The keychain is per user, so a clone cannot have one of its own. The real tool cannot
-    // run; the stand-in first in PATH answers "not found", the one answer that makes
-    // Claude Code keep its login in a file instead. A refused run makes it give up saving.
-    lines.push('', ';; clone: the keychain tool cannot run; a stand-in that finds nothing is used instead');
-    lines.push(`(deny process-exec (literal ${sbString(KEYCHAIN_TOOL)}))`);
-  }
+  // No sandboxed instance can use the keychain: its folder is protected, and it is per user
+  // anyway. So the real tool cannot run either; the stand-in first in PATH answers "not
+  // found", the one answer that makes Claude Code keep its login in a file instead. A tool
+  // that runs but cannot read the keychain, or cannot run at all, makes it give up saving.
+  lines.push('', ';; the keychain tool cannot run; a stand-in that finds nothing is used instead');
+  lines.push(`(deny process-exec (literal ${sbString(KEYCHAIN_TOOL)}))`);
   if (clone && !app.homeVisible) {
     lines.push('', ';; clone: the real home folder is invisible, and the system temp directory cannot be listed');
     lines.push(`(deny file-read* file-write* (subpath ${sbString(canonical(home))}))`);
@@ -155,7 +154,7 @@ export function buildEnv(app, port, base = process.env, instanceHome = '') {
   }
   const home = app.isolateHome && instanceHome ? instanceHome : '';
   if (home) Object.assign(env, { HOME: home, CFFIXED_USER_HOME: home, TMPDIR: path.join(home, 'tmp') });
-  if (home) env.PATH = [NO_KEYCHAIN_DIR, ...String(base.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin').split(':').filter((d) => d && d !== NO_KEYCHAIN_DIR)].join(':');
+  if (!app.unsandboxed) env.PATH = [NO_KEYCHAIN_DIR, ...String(base.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin').split(':').filter((d) => d && d !== NO_KEYCHAIN_DIR)].join(':');
   // A clone that sees your files works on your repositories, so git keeps your identity.
   if (home && app.homeVisible) env.GIT_CONFIG_GLOBAL ??= path.join(os.homedir(), '.gitconfig');
   if (app.timezone) env.TZ = app.timezone; // set before app.env, so an explicit TZ there still wins

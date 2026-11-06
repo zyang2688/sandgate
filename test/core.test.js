@@ -217,7 +217,7 @@ describe('Seatbelt profile', () => {
     assert.equal(env.no_proxy, undefined);
     assert.equal(env.HTTPS_PROXY, 'http://127.0.0.1:17900');
     assert.equal(env.ALL_PROXY, 'socks5h://127.0.0.1:17900');
-    assert.equal(env.PATH, '/bin');
+    assert.equal(env.PATH, `${NO_KEYCHAIN_DIR}:/bin`, 'only the keychain stand-in goes in front');
   });
 });
 
@@ -2673,7 +2673,7 @@ describe('terminal commands', () => {
     assert.equal(validateApp({ ...base, command: '~/.local/bin/claude' }).command, path.join(os.homedir(), '.local/bin/claude'));
   });
 
-  test('a clone cannot run the keychain tool; a home-visible clone still sees your files', () => {
+  test('no sandboxed instance can run the keychain tool; a home-visible clone still sees your files', () => {
     const opts = { sandgateDir: '/sg', instancesDir: '/sg-instances', instanceHome: '/sg-instances/a', home: '/Users/u', tempDir: '/private/tmp' };
     const keychain = '(deny process-exec (literal "/usr/bin/security"))';
     const homeDeny = '(deny file-read* file-write* (subpath "/Users/u"))';
@@ -2686,13 +2686,18 @@ describe('terminal commands', () => {
     assert.ok(visible.includes('(deny file-read* file-write* (subpath "/Users/u/.ssh"))'), 'protected paths still win');
     assert.ok(visible.includes('(subpath "/sg-instances")'), 'other instances stay hidden');
     const shared = buildProfile({ network: 'none', isolateHome: false, command: '/bin/sh' }, opts);
-    assert.ok(!shared.includes(keychain), 'shared data keeps the real keychain');
+    assert.ok(shared.includes(keychain), 'shared data cannot read the keychain folder either');
   });
 
-  test('a clone finds the keychain stand-in first in PATH; shared data does not', () => {
+  test('every sandboxed instance finds the keychain stand-in first in PATH; an unsandboxed one does not', () => {
     const clone = buildEnv({ network: 'none', isolateHome: true, env: {} }, null, { HOME: '/Users/u', PATH: `/usr/bin:${NO_KEYCHAIN_DIR}:/bin` }, '/inst');
     assert.deepEqual(clone.PATH.split(':'), [NO_KEYCHAIN_DIR, '/usr/bin', '/bin']);
-    assert.equal(buildEnv({ network: 'none', isolateHome: false, env: {} }, null, { HOME: '/Users/u', PATH: '/usr/bin' }, '/inst').PATH, '/usr/bin');
+    const shared = buildEnv({ network: 'none', isolateHome: false, env: {} }, null, { HOME: '/Users/u', PATH: '/usr/bin' }, '/inst');
+    assert.deepEqual(shared.PATH.split(':'), [NO_KEYCHAIN_DIR, '/usr/bin']);
+    assert.equal(shared.HOME, '/Users/u', 'shared data keeps your HOME, so ~ is your home folder');
+    assert.equal(buildEnv({ network: 'open', unsandboxed: true, isolateHome: false, env: {} }, null, { HOME: '/Users/u', PATH: '/usr/bin' }, '/inst').PATH, '/usr/bin');
+    const claude = buildEnv({ network: 'none', isolateHome: false, env: { CLAUDE_CONFIG_DIR: '{data}/.claude' } }, null, { HOME: '/Users/u', PATH: '/usr/bin' }, '/inst');
+    assert.equal(claude.CLAUDE_CONFIG_DIR, '/inst/.claude');
     const hidden = buildProfile({ network: 'none', isolateHome: true, command: '/bin/sh' }, { sandgateDir: '/sg', instanceHome: '/sg-i/a', tempDir: '/private/tmp' });
     if (NO_KEYCHAIN_DIR.startsWith(`${os.homedir()}/`)) {
       assert.ok(hidden.includes(`(allow file-read* (subpath ${JSON.stringify(fs.realpathSync(NO_KEYCHAIN_DIR))}))`), 'a clone that hides your home can still run the stand-in');
@@ -3009,6 +3014,8 @@ describe('paths a clone shares with you', () => {
     for (const bad of ['/etc', '../x', '.claude/../..', '', 'a//b']) {
       assert.throws(() => validateApp({ ...base, linkedPaths: [bad] }), ValidationError, bad);
     }
-    assert.deepEqual(validateApp({ ...base, homeVisible: false, linkedPaths: ['.claude/projects'] }).linkedPaths, []);
+    assert.deepEqual(validateApp({ ...base, homeVisible: false, linkedPaths: ['.claude/projects'] }).linkedPaths, [], 'a clone that hides your home');
+    assert.deepEqual(validateApp({ ...base, isolateHome: false, linkedPaths: ['.claude/projects'] }).linkedPaths, ['.claude/projects'], 'shared data sees your home');
+    assert.deepEqual(validateApp({ ...base, network: 'open', unsandboxed: true, linkedPaths: ['.claude/projects'] }).linkedPaths, []);
   });
 });

@@ -368,15 +368,14 @@ const PRESETS = {
     apply(f) { f.blockBrokers.checked = true; f.allowUnixSockets.checked = false; },
   },
   claude: {
-    note: '分身有自己的 HOME，所以每个实例可以登录不同账号；你的项目目录照常可读写。会话记录、记忆、设置、skills 等通过“和主环境共用的路径”和你共用一份，CloudCLI 也能看到；登录、~/.claude.json 和缓存是账号自己的。钥匙串工具在分身里不能运行，登录保存在实例目录的 .claude/.credentials.json 里（权限 600，其他实例读不到）。登录时不会打开浏览器，把终端里显示的链接复制到浏览器打开。自动更新已关闭，用主环境的 claude update 更新。',
+    note: '共用数据模式：HOME 就是你的用户目录，~ 指向它，项目照常读写。CLAUDE_CONFIG_DIR 把 Claude Code 的 .claude、.claude.json 和登录放进实例目录，所以每个实例可以登录不同账号；会话记录、记忆、设置、skills 等通过“和主环境共用的路径”和你共用一份，CloudCLI 也能看到。沙盒里钥匙串工具不能运行，登录保存在实例目录的 .claude/.credentials.json 里（权限 600，其他实例读不到）。登录时不会打开浏览器，把终端里显示的链接复制到浏览器打开。自动更新已关闭，用主环境的 claude update 更新。',
     apply(f) {
       f.command.value ||= '~/.local/bin/claude';
       f.blockBrokers.checked = true;
       f.allowUnixSockets.checked = false;
-      f.dataMode.value = 'clone';
-      f.homeVisible.checked = true;
+      f.dataMode.value = 'shared';
       f.alias.value ||= 'claude';
-      if (!f.env.value.trim()) f.env.value = 'BROWSER=/usr/bin/false\nDISABLE_AUTOUPDATER=1';
+      if (!f.env.value.trim()) f.env.value = 'CLAUDE_CONFIG_DIR={data}/.claude\nBROWSER=/usr/bin/false\nDISABLE_AUTOUPDATER=1';
       if (!f.linkedPaths.value.trim()) f.linkedPaths.value = CLAUDE_SHARED.join('\n');
       syncDataMode();
     },
@@ -417,7 +416,7 @@ function syncNetworkField({ takeTimezone = false } = {}) {
 
 const DATA_MODE_NOTES = {
   clone: '程序的 HOME 是实例目录，配置、缓存和登录状态都存在那里，删除实例时一起删除。默认看不到你的用户目录，需要交换文件时用下面的共享文件夹，或者勾选“分身也能读写你的用户目录”。',
-  shared: '程序照常使用你的用户目录，和直接打开时一样，只有网络被隔离。.ssh、钥匙串等受保护目录仍然不可访问。',
+  shared: '程序照常使用你的用户目录，和直接打开时一样，只有网络被隔离。.ssh、钥匙串等受保护目录仍然不可访问。程序自己的配置要分开时，用它支持的环境变量指到 {data}，比如 Claude Code 的 CLAUDE_CONFIG_DIR={data}/.claude。',
 };
 
 function syncSandbox() {
@@ -436,7 +435,7 @@ function syncDataMode() {
   $('data-mode-note').textContent = DATA_MODE_NOTES[f.dataMode.value];
   $('shared-field').hidden = f.dataMode.value !== 'clone' || f.homeVisible.checked;
   $('home-visible-field').hidden = f.dataMode.value !== 'clone';
-  $('linked-field').hidden = f.dataMode.value !== 'clone' || !f.homeVisible.checked;
+  $('linked-field').hidden = f.dataMode.value === 'clone' && !f.homeVisible.checked;
 }
 
 function fillAppForm(f, app) {
@@ -528,7 +527,7 @@ $('app-form').addEventListener('submit', async (e) => {
     shared: lines(f.shared.value),
     homeVisible: f.dataMode.value === 'clone' && f.homeVisible.checked,
     alias: f.alias.value.trim(),
-    linkedPaths: f.dataMode.value === 'clone' && f.homeVisible.checked ? lines(f.linkedPaths.value) : [],
+    linkedPaths: f.dataMode.value === 'shared' || f.homeVisible.checked ? lines(f.linkedPaths.value) : [],
     blockBrokers: f.blockBrokers.checked,
     allowUnixSockets: f.allowUnixSockets.checked,
     restrictWrites: f.restrictWrites.checked,

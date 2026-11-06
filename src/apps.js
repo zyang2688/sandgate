@@ -339,13 +339,19 @@ export class AppManager {
     });
   }
 
-  /** A shared-data instance gets a directory only if it asks for one through {data}. */
+  /**
+   * A shared-data instance gets a directory only if it asks for one through {data} or links
+   * paths into it. Its links live there too: with CLAUDE_CONFIG_DIR={data}/.claude, the
+   * instance's `.claude/projects` is the one Claude Code uses, and it points at yours.
+   */
   #prepareDataDir(app) {
     const home = this.store.instanceHome(app.id);
+    const links = app.linkedPaths ?? [];
     const usesData = [...app.args, ...Object.values(app.env)].some((v) => v.includes('{data}'));
-    if (app.isolateHome || usesData) fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+    if (app.isolateHome || usesData || links.length) fs.mkdirSync(home, { recursive: true, mode: 0o700 });
     if (app.isolateHome) fs.mkdirSync(path.join(home, 'tmp'), { recursive: true, mode: 0o700 });
-    return app.isolateHome && app.homeVisible ? linkHomePaths(home, app.linkedPaths ?? [], { realHome: this.homeDir, tag: app.id }) : [];
+    const seesHome = !app.unsandboxed && (!app.isolateHome || app.homeVisible);
+    return seesHome ? linkHomePaths(home, links, { realHome: this.homeDir, tag: app.id }) : [];
   }
 
   /** Removes the definition along with the instance's data directory. */
@@ -444,7 +450,7 @@ export class AppManager {
       ['token', '读取 SandGate 令牌', '/bin/cat', this.store.tokenPath],
       ['peers', '列出其他实例的目录', '/bin/ls', this.store.instancesDir],
     ];
-    if (app.isolateHome) denials.push(['keychain', '运行钥匙串工具 (security)', KEYCHAIN_TOOL, 'list-keychains']);
+    denials.push(['keychain', '运行钥匙串工具 (security)', KEYCHAIN_TOOL, 'list-keychains']);
     if (app.isolateHome && !app.homeVisible) {
       denials.push(
         ['real-home', '读取真实用户目录', '/bin/ls', os.homedir()],
