@@ -15,7 +15,7 @@ import { GateManager, GateMonitor, PinMismatch, buildChecks, decide, verifyPin }
 import { ClashSync, applySpec, buildSpec, currentScriptFile, missingTargets, renderRuntimeYaml, validateNetProfile, withManagedBlock } from '../src/netprofile.js';
 import { GatePort } from '../src/gateport.js';
 import { ConnectionGuard, findViolations, rulesFingerprint, ipv6Check, modeWarning } from '../src/guard.js';
-import { PfPlanner, parseCidrList, parseClashConfig, resolveTargets } from '../src/pfplan.js';
+import { PfPlanner, parseCidrList, parseClashConfig, resolveTargets, sectionLines, unquote } from '../src/pfplan.js';
 import { buildEnv, buildProfile, expandVars, sbString } from '../src/profile.js';
 import { ServiceManager, buildPlist, startMessage } from '../src/service.js';
 
@@ -2087,6 +2087,175 @@ tun:
       const conn = { id: '1', chains: ['other'], metadata: { inboundName: 'sgp-abc' } };
       assert.deepEqual(findViolations([conn], { defaultNode: 'us', listeners: {} }), []);
     });
+  });
+});
+
+describe('sending foreign DIRECT through a group', () => {
+  const gate = { listeners: {}, foreignDirectVia: '🌐 Proxy', pfCnList: 'ruleset/cn.txt', pfExtra: ['8.8.8.0/24'] };
+  const spec = (over = {}) => buildSpec({ netProfiles: [], gate: { ...gate, ...over } });
+  const config = () => ({
+    proxies: [{ name: 'us' }],
+    'proxy-groups': [{ name: '🌐 Proxy' }],
+    rules: [
+      'DOMAIN-SUFFIX,adobe.com,DIRECT',
+      'IP-CIDR,192.168.0.0/16,DIRECT,no-resolve',
+      'DOMAIN-SUFFIX,google.com,🌐 Proxy',
+      'AND,((DOMAIN,a.example),(NETWORK,udp)),DIRECT',
+      'DOMAIN-REGEX,^(a|b)\\.example$,DIRECT',
+      'MATCH,DIRECT',
+    ],
+    'rule-providers': { china_ip: { type: 'http' } },
+    dns: { nameserver: ['https://dns.alidns.com/dns-query'], fallback: ['https://dns.google/dns-query', 'tls://1.1.1.1#us'] },
+  });
+
+  test('a DIRECT rule stays DIRECT only for allowed addresses, and otherwise takes the group', () => {
+    const c = applySpec(config(), spec());
+    const [guard, fallback] = c.rules.slice(0, 2);
+    assert.match(guard, /^AND,\(\(DOMAIN-SUFFIX,adobe\.com\),\(OR,\(\(RULE-SET,sandgate-cn\),\(IP-CIDR,10\.0\.0\.0\/8\),/);
+    assert.ok(guard.includes('(IP-CIDR,8.8.8.0/24)'), 'pf\'s extra list counts as allowed');
+    assert.ok(guard.includes('(IP-CIDR6,fe80::/10)'));
+    assert.ok(guard.endsWith('))),DIRECT'));
+    assert.equal(fallback, 'DOMAIN-SUFFIX,adobe.com,🌐 Proxy');
+    assert.ok(c.rules[2].startsWith('AND,((IP-CIDR,192.168.0.0/16,no-resolve),'), 'options stay with the inner rule');
+    assert.equal(c.rules[3], 'IP-CIDR,192.168.0.0/16,🌐 Proxy,no-resolve');
+  });
+
+  test('leaves other targets, logic rules and bracketed payloads alone, and guards MATCH,DIRECT', () => {
+    const c = applySpec(config(), spec());
+    assert.deepEqual(c.rules.slice(4, 7), config().rules.slice(2, 5));
+    assert.match(c.rules[7], /^OR,\(\(RULE-SET,sandgate-cn\),.*\),DIRECT$/);
+    assert.equal(c.rules[8], 'MATCH,🌐 Proxy');
+    assert.equal(c.rules.length, 9);
+  });
+
+  test('reads the same Mainland list as pf, and keeps the user\'s providers', () => {
+    const c = applySpec(config(), spec());
+    assert.deepEqual(c['rule-providers']['sandgate-cn'], { type: 'file', behavior: 'ipcidr', format: 'text', path: './ruleset/cn.txt', interval: 3600 });
+    assert.ok(c['rule-providers'].china_ip);
+  });
+
+  test('sends fallback DNS through the group, keeping servers that already name a route', () => {
+    const c = applySpec(config(), spec());
+    assert.deepEqual(c.dns.fallback, ['https://dns.google/dns-query#%F0%9F%8C%90%20Proxy&sandgate=1', 'tls://1.1.1.1#us']);
+    assert.deepEqual(c.dns.nameserver, config().dns.nameserver);
+  });
+
+  test('applying twice changes nothing, and turning it off restores the config', () => {
+    const once = applySpec(config(), spec());
+    assert.deepEqual(applySpec(structuredClone(once), spec()), once);
+    const off = applySpec(structuredClone(once), spec({ foreignDirectVia: '' }));
+    assert.deepEqual(off.rules, config().rules);
+    assert.deepEqual(off.dns, config().dns);
+    assert.deepEqual(off['rule-providers'], config()['rule-providers']);
+  });
+
+  test('switching the group replaces the earlier one everywhere', () => {
+    const once = applySpec(config(), spec());
+    const other = applySpec(structuredClone(once), spec({ foreignDirectVia: 'us' }));
+    assert.deepEqual(other, applySpec(config(), spec({ foreignDirectVia: 'us' })));
+    assert.ok(!JSON.stringify(other).includes('Proxy&sandgate'));
+  });
+
+  test('profile sub-rules start from the guarded rules, so a profile can replace the group', () => {
+    const s = buildSpec({ netProfiles: [{ id: 'abc', name: 'c', mode: 'custom', node: '', exits: { '🌐 Proxy': 'us' }, extraRules: [], timezone: '' }], gate: { ...gate, listeners: { 'sgp-abc': 17990 } } });
+    const sub = applySpec(config(), s)['sub-rules']['sgp-abc'];
+    assert.ok(sub[0].startsWith('AND,((DOMAIN-SUFFIX,adobe.com),'));
+    assert.equal(sub[1], 'DOMAIN-SUFFIX,adobe.com,us');
+  });
+
+  test('an unknown group becomes REJECT and is reported', () => {
+    const c = applySpec(config(), spec({ foreignDirectVia: 'gone' }));
+    assert.equal(c.rules[1], 'DOMAIN-SUFFIX,adobe.com,REJECT');
+    assert.deepEqual(missingTargets(spec({ foreignDirectVia: 'gone' }), { proxies: [{ name: 'us' }], groups: [] }), ['gone']);
+  });
+
+  test('settings refuse a group name that would break the rule syntax', () => {
+    for (const bad of ['a,b', 'a(b', 'DIRECT', 'a\nb']) {
+      assert.throws(() => mergeGateSettings(DEFAULT_SETTINGS.gate, { foreignDirectVia: bad }), ValidationError, bad);
+    }
+    assert.equal(mergeGateSettings(DEFAULT_SETTINGS.gate, { foreignDirectVia: ' 🌐 Proxy ' }).foreignDirectVia, '🌐 Proxy');
+    assert.equal(DEFAULT_SETTINGS.gate.foreignDirectVia, '', 'off unless chosen');
+  });
+
+  describe('in the generated YAML', () => {
+    const yaml = `mixed-port: 7890
+dns:
+  enable: true
+  nameserver:
+  - https://dns.alidns.com/dns-query
+  fallback:
+  - https://dns.google/dns-query
+  fallback-filter:
+    geoip: true
+proxies:
+- name: us
+  type: ss
+  server: 1.1.1.1
+proxy-groups:
+- name: 🌐 Proxy
+  type: select
+  proxies:
+  - us
+rule-providers:
+  china_ip:
+    type: http
+    behavior: ipcidr
+rules:
+- DOMAIN-SUFFIX,adobe.com,DIRECT
+- MATCH,🌐 Proxy
+`;
+    const rulesOf = (t) => sectionLines(t, 'rules').map((l) => l.match(/^\s*- (.*)$/)?.[1]).filter(Boolean).map(unquote);
+
+    test('rewrites rules, the provider and fallback DNS, keeping everything else', () => {
+      const out = renderRuntimeYaml(yaml, spec());
+      assert.equal(rulesOf(out).length, 3);
+      assert.equal(rulesOf(out)[1], 'DOMAIN-SUFFIX,adobe.com,🌐 Proxy');
+      assert.match(out, /\n {2}fallback:\n {2}- "https:\/\/dns\.google\/dns-query#%F0%9F%8C%90%20Proxy&sandgate=1"\n {2}fallback-filter:\n {4}geoip: true\n/);
+      assert.match(out, /\n {2}china_ip:\n {4}type: http\n {4}behavior: ipcidr\n {2}"sandgate-cn": \{"type":"file"/);
+      assert.match(out, /\n {2}nameserver:\n {2}- https:\/\/dns\.alidns\.com\/dns-query\n/);
+    });
+
+    test('running twice gives the same result, and turning it off gives back the rules and DNS', () => {
+      const once = renderRuntimeYaml(yaml, spec());
+      assert.equal(renderRuntimeYaml(once, spec()), once);
+      const off = renderRuntimeYaml(once, spec({ foreignDirectVia: '' }));
+      assert.deepEqual(rulesOf(off), rulesOf(yaml));
+      assert.match(off, /\n {2}fallback:\n {2}- "https:\/\/dns\.google\/dns-query"\n/);
+      assert.doesNotMatch(off, /sandgate-cn/);
+    });
+
+    test('handles an inline fallback list', () => {
+      const inline = yaml.replace('  fallback:\n  - https://dns.google/dns-query\n', '  fallback: [https://dns.google/dns-query, "tls://8.8.8.8"]\n');
+      const out = renderRuntimeYaml(inline, spec());
+      assert.ok(out.includes('  fallback: ["https://dns.google/dns-query#%F0%9F%8C%90%20Proxy&sandgate=1","tls://8.8.8.8#%F0%9F%8C%90%20Proxy&sandgate=1"]\n'));
+    });
+
+    test('with the guard off and nothing else to manage the file is untouched', () => {
+      assert.equal(renderRuntimeYaml(yaml, spec({ foreignDirectVia: '' })), yaml);
+    });
+
+    const mihomo = '/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo';
+    test('mihomo accepts the result', { skip: fs.existsSync(mihomo) ? false : 'no verge-mihomo here' }, () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sg-guard-'));
+      fs.mkdirSync(path.join(dir, 'ruleset'));
+      fs.writeFileSync(path.join(dir, 'ruleset/cn.txt'), '1.0.1.0/24\n');
+      // Offline: the http provider becomes a file one, so the check needs no download.
+      const out = renderRuntimeYaml(yaml, spec())
+        .replace('    type: http\n    behavior: ipcidr\n', '    type: file\n    behavior: ipcidr\n    path: ./ruleset/cn.txt\n')
+        .replace('  server: 1.1.1.1\n', '  server: 1.1.1.1\n  port: 1\n  cipher: aes-128-gcm\n  password: x\n');
+      fs.writeFileSync(path.join(dir, 'config.yaml'), out);
+      const r = execFileSync(mihomo, ['-d', dir, '-t', '-f', path.join(dir, 'config.yaml')], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      assert.match(r, /test is successful/);
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+  });
+
+  test('the script extension carries the guard even with no profiles', () => {
+    const script = 'function main(config, profileName) {\n  return config;\n}\n';
+    const out = withManagedBlock(script, spec());
+    const main = new Function(`${out};return main;`)();
+    assert.deepEqual(main(config(), 'p'), applySpec(config(), spec()));
+    assert.equal(withManagedBlock(out, spec({ foreignDirectVia: '' })), script);
   });
 });
 

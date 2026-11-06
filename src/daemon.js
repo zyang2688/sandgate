@@ -103,6 +103,12 @@ export class Sandgate {
     const ports = Object.keys(this.store.data.gate.listeners).length ? Object.values(this.store.data.gate.listeners) : [];
     const open = await Promise.all(ports.map((p) => tcpProbe(p).then(() => true, () => false)));
     if (open.includes(false)) return this.clashSync.apply();
+    // Clash Verge may have rebuilt its config from a profile without the guard.
+    if (this.store.data.gate.foreignDirectVia) {
+      const live = await this.client.rules().catch(() => null);
+      const guarded = live?.rules?.some((r) => String(r.payload).includes('sandgate-cn'));
+      if (live && !guarded) return this.clashSync.apply();
+    }
     try {
       this.clashSync.writeScript();
       this.clashSync.status = { state: 'ok', message: '已同步到 Clash', at: Date.now() };
@@ -272,12 +278,16 @@ export class Sandgate {
     };
   }
 
-  #putSettings(body) {
+  async #putSettings(body) {
+    const guardOf = (g) => JSON.stringify([g.foreignDirectVia, g.pfCnList, g.pfExtra]);
+    const before = guardOf(this.store.data.gate);
     this.store.data.gate = mergeGateSettings(this.store.data.gate, body.gate ?? {});
     this.store.save();
     this.#applyGateSettings();
     if (this.background) this.pfPlanner.tick();
-    return { ...this.#publicSettings(), pf: this.pfPlanner.status };
+    // The guard lives in Clash's rules, so a change there needs a sync like a profile change.
+    const sync = guardOf(this.store.data.gate) !== before ? await this.clashSync.apply() : undefined;
+    return { ...this.#publicSettings(), pf: this.pfPlanner.status, ...(sync ? { sync } : {}) };
   }
 
   #detect() {

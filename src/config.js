@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     pfTargets: [], // node or group names whose servers pf may reach
     pfExtra: [], // extra destinations for foreign DIRECT traffic
     pfCnList: 'ruleset/sukka/china-ip.txt', // relative to the Clash Verge directory
+    foreignDirectVia: '', // where DIRECT traffic to a non-CN IP goes instead, so it matches pf; '' leaves rules alone
     requireTun: true,
     requireNode: false, // a dead node only fails its connections, so it need not close the gate
     requirePin: true,
@@ -150,6 +151,8 @@ export function mergeGateSettings(current, patch = {}) {
     const first = Number(m?.[1]);
     if (!m || m.slice(1, 5).some((o) => Number(o) > 255) || prefix < 8 || prefix > 32 || first === 0 || first === 127 || first >= 224) fail(`额外放行无效: ${c}（需为 IPv4，前缀至少 /8）`);
   }
+  g.foreignDirectVia = String(g.foreignDirectVia ?? '').trim();
+  if (hasControl(g.foreignDirectVia) || /[,()]/.test(g.foreignDirectVia) || g.foreignDirectVia === 'DIRECT') fail('国外直连改走的组无效');
   if (typeof g.pfCnList !== 'string' || !g.pfCnList.trim() || g.pfCnList.startsWith('/') || g.pfCnList.includes('..') || hasControl(g.pfCnList)) fail('国内 IP 列表路径无效');
   g.stableSec = posNum(g.stableSec, '稳定时长', 1);
   g.delayIntervalSec = posNum(g.delayIntervalSec, '延迟检查间隔', 1);

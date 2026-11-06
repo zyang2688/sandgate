@@ -94,6 +94,10 @@
             <label class="wide">额外放行（每行一个 IPv4 或网段，用于走 DIRECT 的国外目标，前缀至少 /8）
               <textarea name="pfExtra" rows="2" spellcheck="false"></textarea>
             </label>
+            <label class="wide">国外直连改走（组或节点名，留空不改）
+              <input name="foreignDirectVia" list="target-list" spellcheck="false" placeholder="🌐 Proxy">
+              <span class="muted">Clash 规则判为直连、但目标不是国内 IP 也不是局域网的连接，pf 会拦掉。填了以后这些连接改走这里，回退 DNS 也经它查询。保存后同步到 Clash。</span>
+            </label>
             <label>国内 IP 列表（相对 Clash Verge 目录）<input name="pfCnList" spellcheck="false"></label>
             <label>检测直连用的网卡 <input name="probeIface" spellcheck="false"></label>
             <label>限定分流只走一个节点（可选）<input name="defaultNode" list="node-list" spellcheck="false"></label>
@@ -184,6 +188,7 @@
   </main>
 
   <datalist id="node-list"></datalist>
+  <datalist id="target-list"></datalist>
 
   <dialog id="app-dialog" class="dialog">
     <form id="app-form" class="stack" method="dialog">

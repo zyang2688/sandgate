@@ -493,8 +493,9 @@ $('app-form').addEventListener('submit', async (e) => {
 /** Fills the shared node suggestions. Nodes can still be typed if Clash is unreachable. */
 async function loadNodeList() {
   try {
-    const { nodes } = await api('clash/proxies');
+    const { nodes, groups } = await api('clash/proxies');
     $('node-list').innerHTML = nodes.map((n) => `<option value="${esc(n.name)}"></option>`).join('');
+    $('target-list').innerHTML = [...groups, ...nodes].map((n) => `<option value="${esc(n.name)}"></option>`).join('');
     return null;
   } catch (err) {
     if (err instanceof AuthError) { showLogin(); return null; }
@@ -526,6 +527,7 @@ function fillSettings({ gate: g, pfScript }) {
   f.pfTargets.value = g.pfTargets.join('\n');
   f.pfExtra.value = g.pfExtra.join('\n');
   f.pfCnList.value = g.pfCnList;
+  f.foreignDirectVia.value = g.foreignDirectVia;
   f.stable.value = g.stableSec;
   f.requireTun.checked = g.requireTun;
   f.requireNode.checked = g.requireNode;
@@ -579,6 +581,7 @@ $('settings-form').addEventListener('submit', async (e) => {
     pfTargets: lines(f.pfTargets.value),
     pfExtra: lines(f.pfExtra.value),
     pfCnList: f.pfCnList.value.trim(),
+    foreignDirectVia: f.foreignDirectVia.value.trim(),
     exitIps,
     stableSec: f.stable.value,
     requireTun: f.requireTun.checked,
@@ -597,7 +600,7 @@ $('settings-form').addEventListener('submit', async (e) => {
     renderPfPlan(saved.pf);
     const problem = await loadNodeList();
     $('detect-note').textContent = problem ? `读取节点失败：${problem}` : '';
-    $('settings-msg').textContent = '已保存';
+    $('settings-msg').textContent = saved.sync ? `已保存。${saved.sync.message}` : '已保存';
   } catch (err) {
     if (err instanceof AuthError) return showLogin();
     $('settings-msg').textContent = err.message;

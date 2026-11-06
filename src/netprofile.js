@@ -71,7 +71,15 @@ export function buildSpec(data) {
       subRules[key] = { exits: p.exits, extra: p.extraRules };
     }
   }
-  return { listeners: [...listeners.values()], subRules };
+  return { listeners: [...listeners.values()], subRules, guard: buildGuard(data.gate) };
+}
+
+/** Addresses pf passes on the NIC besides the Mainland list: the local network, then pf's extras. */
+export const GUARD_LOCAL = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '100.64.0.0/10', '127.0.0.0/8', '224.0.0.0/4', '255.255.255.255/32', '::1/128', 'fe80::/10', 'ff00::/8'];
+
+function buildGuard(gate = {}) {
+  if (!gate.foreignDirectVia) return null;
+  return { via: gate.foreignDirectVia, cnPath: `./${gate.pfCnList}`, allow: [...GUARD_LOCAL, ...(gate.pfExtra ?? [])] };
 }
 
 /**
@@ -90,7 +98,73 @@ function applySandgateSpec(config, spec) {
 
   config.listeners = (config.listeners || []).filter(function (l) { return !managed(l && l.name); }).concat(spec.listeners);
 
-  var base = Array.isArray(config.rules) ? config.rules : [];
+  // The config may already carry an earlier run's output (Clash Verge's generated file), so
+  // the guard is first undone, then applied again from the current settings.
+  var GUARD_SET = '(RULE-SET,sandgate-cn)';
+  var DNS_MARK = '&sandgate=1';
+  var rules = Array.isArray(config.rules) ? config.rules : [];
+  var plain = [];
+  for (var i = 0; i < rules.length; i++) {
+    var r = String(rules[i]);
+    if (r.indexOf(GUARD_SET) < 0) { plain.push(rules[i]); continue; }
+    // A guard pair: the AND rule, then the same rule pointed at the guard's group.
+    var next = String(rules[i + 1] || '').split(',');
+    if (r.indexOf('OR,(') === 0) plain.push('MATCH,DIRECT');
+    else { next[next[0].trim() === 'MATCH' ? 1 : 2] = 'DIRECT'; plain.push(next.join(',')); }
+    i++;
+  }
+  var providers = config['rule-providers'] || {};
+  delete providers['sandgate-cn'];
+  var dns = config.dns || {};
+  if (Array.isArray(dns.fallback)) {
+    dns.fallback = dns.fallback.map(function (s) {
+      s = String(s);
+      return s.slice(-DNS_MARK.length) === DNS_MARK ? s.slice(0, s.indexOf('#')) : s;
+    });
+  }
+
+  // DIRECT is only kept where pf lets it through: Mainland IPs (the same file pf loads), the
+  // local network and pf's extra list. Anything else matched by a DIRECT rule takes the
+  // guard's group, instead of failing on the NIC. The fallback DNS servers are only queried
+  // for non-Mainland answers, and dialing them directly fails the same way.
+  var g = spec.guard;
+  if (g) {
+    var via = usable(g.via);
+    var allowed = [GUARD_SET].concat(g.allow.map(function (c) {
+      return '(' + (c.indexOf(':') >= 0 ? 'IP-CIDR6' : 'IP-CIDR') + ',' + c + ')';
+    }));
+    var inSet = '(OR,(' + allowed.join(',') + '))';
+    var guarded = [];
+    plain.forEach(function (rule) {
+      var parts = String(rule).split(',');
+      var type = parts[0].trim();
+      if (type === 'MATCH' && parts[1] && parts[1].trim() === 'DIRECT') {
+        guarded.push('OR,(' + allowed.join(',') + '),DIRECT', 'MATCH,' + via);
+        return;
+      }
+      // Logic rules and payloads with brackets cannot be nested safely, so they stay as they are.
+      if (type === 'AND' || type === 'OR' || type === 'NOT' || type === 'SUB-RULE' || type === 'MATCH'
+        || parts.length < 3 || parts[2].trim() !== 'DIRECT' || /[()]/.test(rule)) {
+        guarded.push(rule);
+        return;
+      }
+      var inner = [parts[0], parts[1]].concat(parts.slice(3)).join(',');
+      parts[2] = via;
+      guarded.push('AND,((' + inner + '),' + inSet + '),DIRECT', parts.join(','));
+    });
+    plain = guarded;
+    providers['sandgate-cn'] = { type: 'file', behavior: 'ipcidr', format: 'text', path: g.cnPath, interval: 3600 };
+    if (Array.isArray(dns.fallback)) {
+      dns.fallback = dns.fallback.map(function (s) {
+        return s.indexOf('#') >= 0 ? s : s + '#' + encodeURIComponent(via) + DNS_MARK;
+      });
+    }
+  }
+  config.rules = plain;
+  if (Object.keys(providers).length) config['rule-providers'] = providers;
+  if (config.dns) config.dns = dns;
+
+  var base = plain;
   var subs = {};
   Object.keys(config['sub-rules'] || {}).forEach(function (k) { if (!managed(k)) subs[k] = config['sub-rules'][k]; });
   Object.keys(spec.subRules).forEach(function (name) {
@@ -124,6 +198,7 @@ export function missingTargets(spec, { proxies, groups }) {
   const known = new Set([...proxies, ...groups].map((p) => p.name));
   for (const b of ['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL']) known.add(b);
   const missing = new Set();
+  if (spec.guard && !known.has(spec.guard.via)) missing.add(spec.guard.via);
   for (const s of Object.values(spec.subRules)) {
     for (const t of Object.values(s.exits)) if (!known.has(t)) missing.add(t);
     for (const r of s.extra) {
@@ -175,26 +250,66 @@ function mapEntries(lines) {
 }
 
 /**
+ * Where `dns.fallback`'s items are in the file: a block list, which Verge writes at the
+ * key's own indent, or an inline one. Null when there is no such key.
+ */
+function findFallback(lines) {
+  const dns = lines.findIndex((l) => l.startsWith('dns:'));
+  if (dns < 0) return null;
+  for (let i = dns + 1; i < lines.length && !/^[^\s#-]/.test(lines[i]); i++) {
+    const m = lines[i].match(/^(\s+)fallback:\s*(.*)$/);
+    if (!m) continue;
+    const indent = m[1];
+    if (m[2].startsWith('[')) return { at: i, count: 0, indent, inline: true, values: m[2].replace(/\s+#.*$/, '').slice(1, -1).split(',').map(unquote).filter(Boolean) };
+    let end = i + 1;
+    while (end < lines.length && lines[end].startsWith(indent) && /^\s*- /.test(lines[end])) end++;
+    return { at: i, count: end - i - 1, indent, inline: false, values: lines.slice(i + 1, end).map((l) => unquote(l.replace(/^\s*- /, ''))) };
+  }
+  return null;
+}
+
+/**
  * Applies the spec to Clash Verge's generated config as text, since this project has no
- * YAML library. Only `listeners` and `sub-rules` are rewritten, and YAML accepts the
- * JSON used for the managed entries.
+ * YAML library. Only `listeners`, `sub-rules`, `rules`, SandGate's rule provider and
+ * `dns.fallback` are rewritten, each only when it changes, and YAML accepts the JSON used
+ * for the managed entries.
  */
 export function renderRuntimeYaml(text, spec) {
   const parsed = parseClashConfig(text);
   const rules = sectionLines(text, 'rules').map((l) => l.match(/^\s*- (.*)$/)?.[1]).filter(Boolean).map(unquote);
-  const result = applySpec({ rules, proxies: parsed.proxies, 'proxy-groups': parsed.groups, listeners: [], 'sub-rules': {} }, spec);
+  let lines = text.split(/\r?\n/);
+  const fallback = findFallback(lines);
+  const config = { rules, proxies: parsed.proxies, 'proxy-groups': parsed.groups, listeners: [], 'sub-rules': {}, 'rule-providers': {} };
+  if (fallback) config.dns = { fallback: [...fallback.values] };
+  const result = applySpec(config, spec);
 
   const isManaged = (name) => name.startsWith('sandgate-') || name.startsWith('sgp-');
   const { indent: listIndent, items } = listItems(sectionLines(text, 'listeners'));
   const keptListeners = items.filter((i) => !isManaged(nameOf(i))).flat();
   const { indent: mapIndent, entries } = mapEntries(sectionLines(text, 'sub-rules'));
   const keptSubs = entries.filter((e) => !isManaged(e.key)).flatMap((e) => e.lines);
+  const providerLines = sectionLines(text, 'rule-providers');
+  const { indent: provIndent, entries: provEntries } = mapEntries(providerLines);
+  const keptProviders = provEntries.filter((e) => !isManaged(e.key)).flatMap((e) => e.lines);
+  const newProviders = Object.entries(result['rule-providers'] ?? {}).map(([k, v]) => `${provIndent}${JSON.stringify(k)}: ${JSON.stringify(v)}`);
+  const providersChanged = JSON.stringify([...keptProviders, ...newProviders]) !== JSON.stringify(provEntries.flatMap((e) => e.lines));
+  const rulesChanged = result.rules.length !== rules.length || result.rules.some((r, i) => r !== rules[i]);
 
-  let lines = text.split(/\r?\n/);
+  // In place first, so the line numbers found above still hold.
+  const fb = result.dns?.fallback;
+  if (fallback && fb.some((v, i) => v !== fallback.values[i])) {
+    const key = `${fallback.indent}fallback:`;
+    const replacement = fallback.inline ? [`${key} ${JSON.stringify(fb)}`] : [key, ...fb.map((v) => `${fallback.indent}- ${JSON.stringify(v)}`)];
+    lines.splice(fallback.at, fallback.count + 1, ...replacement);
+  }
   lines = removeSection(lines, 'listeners');
   lines = removeSection(lines, 'sub-rules');
+  if (rulesChanged) lines = removeSection(lines, 'rules');
+  if (providersChanged) lines = removeSection(lines, 'rule-providers');
   while (lines.length && !lines.at(-1).trim()) lines.pop();
 
+  if (providersChanged && (keptProviders.length || newProviders.length)) lines.push('rule-providers:', ...keptProviders, ...newProviders);
+  if (rulesChanged) lines.push('rules:', ...result.rules.map((r) => `- ${JSON.stringify(r)}`));
   const newListeners = result.listeners.map((l) => `${listIndent}- ${JSON.stringify(l)}`);
   if (keptListeners.length || newListeners.length) lines.push('listeners:', ...keptListeners, ...newListeners);
   const newSubs = Object.entries(result['sub-rules'] ?? {}).map(([k, v]) => `${mapIndent}${JSON.stringify(k)}: ${JSON.stringify(v)}`);
@@ -224,7 +339,7 @@ export function withManagedBlock(source, spec) {
     const lineEnd = source.indexOf('\n', end);
     text = source.slice(0, lineStart) + source.slice(lineEnd < 0 ? source.length : lineEnd + 1);
   }
-  if (!spec.listeners.length) return text;
+  if (!spec.listeners.length && !spec.guard) return text;
   const at = text.lastIndexOf('return config');
   if (at < 0) throw new Error('脚本扩展里找不到 return config');
   const lineStart = text.lastIndexOf('\n', at) + 1;
