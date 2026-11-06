@@ -4,6 +4,7 @@
   "description": "macOS per-app network sandbox manager: apps get network only while Clash TUN and a pinned node are healthy.",
   "type": "module",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "bin": { "sandgate": "bin/sandgate.js" },
   "scripts": {
     "start": "node bin/sandgate.js",

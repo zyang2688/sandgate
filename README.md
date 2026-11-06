@@ -1,4 +1,24 @@
+<div align="center">
+
+**简体中文** · [English](README.en.md)
+
+<img src="docs/assets/logo.svg" width="112" alt="SandGate">
+
 # SandGate
+
+**Clash 出问题时不漏真实 IP，让每个程序走自己的出口**
+
+[![macOS](https://img.shields.io/badge/macOS-only-1b1f24?logo=apple&logoColor=white)](#快速开始)
+[![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-5fa04e?logo=nodedotjs&logoColor=white)](#快速开始)
+[![Clash Verge](https://img.shields.io/badge/Clash_Verge-mihomo-245fd6)](#自动同步到-clash)
+[![Dependencies](https://img.shields.io/badge/dependencies-0-157347)](#开发)
+[![License](https://img.shields.io/badge/license-GPL--3.0-a42e2b)](LICENSE)
+
+[快速开始](#快速开始) · [全机防护](#全机防护) · [沙盒实例](#沙盒实例) · [常见问题](#常见问题) · [命令](#命令)
+
+</div>
+
+<br>
 
 SandGate 是一个 macOS 工具，配合 Clash Verge 使用，通过网页配置。它解决两个问题：
 
@@ -28,12 +48,14 @@ SandGate 是一个 macOS 工具，配合 Clash Verge 使用，通过网页配置
 - [尚未验证的情况](#尚未验证的情况)
 - [设计记录](#设计记录)
 - [开发](#开发)
+- [许可证](#许可证)
 
 ## 快速开始
 
 需要 Node 20 及以上和 Clash Verge，没有其他依赖。
 
-**以下命令都在普通终端里运行。** `sandbox-exec` 不能嵌套，在已经沙盒化的环境里运行时实例会以退出码 71 失败。
+> [!IMPORTANT]
+> **以下命令都在普通终端里运行。** `sandbox-exec` 不能嵌套，在已经沙盒化的环境里运行时实例会以退出码 71 失败。
 
 1. **启动 SandGate：** 装成后台服务，登录后自动运行。
 
@@ -68,13 +90,25 @@ SandGate 是一个 macOS 工具，配合 Clash Verge 使用，通过网页配置
 
 物理网卡只能连四类目标：放行的节点、国内 IP、mihomo 的引导 DNS、局域网。pf 只看目标地址，不分辨是哪个程序发的包。
 
-```
-普通程序 ─▶ TUN ─▶ Clash 按规则分流 ─┬─ DIRECT ─▶ 物理网卡 ─▶ 国内 IP：放行；国外：拦截
-                                    └─ 节点 ───▶ 物理网卡 ─▶ 放行的节点：放行；其他节点：拦截
-Clash 中断 ─▶ 路由回落到物理网卡 ─▶ 国外被拦截；系统 DNS 被拦截，域名基本都解析不了
+```mermaid
+flowchart LR
+  app["普通程序"] --> tun["TUN"] --> clash{"Clash<br>按规则分流"}
+  clash -- "DIRECT" --> nic1["物理网卡"]
+  clash -- "节点" --> nic2["物理网卡"]
+  nic1 --> cn["国内 IP：放行"]
+  nic1 --> foreign["国外：拦截"]
+  nic2 --> allowed["放行的节点：放行"]
+  nic2 --> other["其他节点：拦截"]
+  down["Clash 中断"] --> fallback["路由回落到物理网卡"] --> dead["国外被拦截<br>系统 DNS 被拦截，域名基本都解析不了"]
+
+  classDef pass fill:#e7f5ed,stroke:#157347,color:#0b3d24
+  classDef block fill:#fbeceb,stroke:#b3261e,color:#5c120e
+  class cn,allowed pass
+  class foreign,other,dead block
 ```
 
-**Clash 中断时，依赖域名的程序基本都会断网，包括微信和国内网站。** 这是有意的取舍：放行系统 DNS 能让国内网站继续用，但所有访问过的域名都会以明文发给 DNS 服务器。
+> [!WARNING]
+> **Clash 中断时，依赖域名的程序基本都会断网，包括微信和国内网站。** 这是有意的取舍：放行系统 DNS 能让国内网站继续用，但所有访问过的域名都会以明文发给 DNS 服务器。
 
 ### 安装后的行为
 
@@ -90,7 +124,8 @@ Clash 中断 ─▶ 路由回落到物理网卡 ─▶ 国外被拦截；系统 
 
 ### 出问题时怎么恢复
 
-**安装后，重启不会清除规则。**
+> [!CAUTION]
+> **安装后，重启不会清除规则。**
 
 1. 能进系统就运行 `sudo /usr/local/sbin/sandgate-pf uninstall`。
 2. 连续两次开机都在 10 分钟内异常结束（panic、强制关机）时，服务会自动停止加载规则，直到重新运行 `install`。这时全机防护未生效，页面会显示未生效，`status` 也会提示。正常关机不计入。
@@ -141,12 +176,24 @@ Clash 中断 ─▶ 路由回落到物理网卡 ─▶ 国外被拦截；系统 
 | **全部走一个节点** | 所有流量都走这个节点 | 不认代理的程序连不上 | 要 | 系统强制 |
 | **完全禁网** | 不能联网 | 不可用 | 不适用 | 系统强制 |
 
-```
-跟随 Clash：       实例 ─▶ TUN ─▶ Clash 主规则
-在规则上修改：     实例 ─▶ 闸门端口 ─▶ 专用端口 ─▶ 这份配置的子规则 ─┬─ 替换后的出口
-                                                                   └─ DIRECT 等其他规则不变
-  不认代理的子程序（如 SSH）─▶ TUN ─▶ Clash 主规则
-全部走一个节点：   实例 ─(只能连闸门端口)─▶ 闸门端口 ─▶ 专用端口 ─▶ 节点
+```mermaid
+flowchart TB
+  subgraph follow["跟随 Clash"]
+    direction LR
+    f1["实例"] --> f2["TUN"] --> f3["Clash 主规则"]
+  end
+  subgraph modify["在规则上修改"]
+    direction LR
+    m1["实例"] --> m2["闸门端口"] --> m3["专用端口"] --> m4{"这份配置的子规则"}
+    m4 --> m5["替换后的出口"]
+    m4 --> m6["DIRECT 等其他规则不变"]
+    m7["不认代理的子程序（如 SSH）"] --> m8["TUN"] --> m9["Clash 主规则"]
+  end
+  subgraph single["全部走一个节点"]
+    direction LR
+    s1["实例"] -- "只能连闸门端口" --> s2["闸门端口"] --> s3["专用端口"] --> s4["节点"]
+  end
+  follow ~~~ modify ~~~ single
 ```
 
 **怎么选：**
@@ -188,10 +235,16 @@ Clash 中断 ─▶ 路由回落到物理网卡 ─▶ 国外被拦截；系统 
 
 替换按策略组进行，规则指向哪个组，就只有替换了那个组才会变。一个网页的流量可能分几路走，比如只把 `🌐 Proxy` 换成新加坡时：
 
-```
-网页本身     → 🌐 Proxy → 新加坡（已替换）
-图片、脚本   → US       → 美国（命中 CDN 规则，没替换）
-内网、国内   → DIRECT   → 真实 IP
+```mermaid
+flowchart LR
+  page["网页本身"] --> proxy["🌐 Proxy"] --> sg["新加坡（已替换）"]
+  assets["图片、脚本"] --> us["US"] --> usx["美国（命中 CDN 规则，没替换）"]
+  lan["内网、国内"] --> dr["DIRECT"] --> real["真实 IP"]
+
+  classDef swapped fill:#e7f5ed,stroke:#157347,color:#0b3d24
+  classDef kept fill:#fff4dc,stroke:#8a5a00,color:#4a3000
+  class sg swapped
+  class usx,real kept
 ```
 
 CDN 规则是专门给静态资源域名（图片、视频、脚本、安装包）指定出口的规则集，比如 `cdn_domainset`、`cdn_non_ip`。如果它们指向 `US` 组，只换 `🌐 Proxy` 时这部分仍走美国。
@@ -259,7 +312,8 @@ SandGate 也会接管配置里名字以 `sandgate-` 或 `sgp-` 开头的端口�
 | 受保护目录（`.ssh`、钥匙串等） | 不可访问 | 不可访问 |
 | 其他实例的目录 | 不可访问 | 不可访问 |
 
-**删除实例时，实例目录会一起删除，无法恢复。**
+> [!CAUTION]
+> **删除实例时，实例目录会一起删除，无法恢复。**
 
 实例停止时可以点“清空数据”：只删除实例目录里的内容，实例的设置保留，下次启动就像第一次打开。共用数据模式下，程序放在你用户目录里的数据不受影响。
 
@@ -414,7 +468,8 @@ sudo /usr/local/sbin/sandgate-pf uninstall
 
 后台服务是用户级的 LaunchAgent，只在崩溃后自动重启。安装后 macOS 可能提示新增了后台项目，可以在「系统设置 > 通用 > 登录项与扩展」里管理。
 
-**重启 SandGate 不会终止实例。** 实例继续运行，新进程启动后核对进程号和启动时间，再重新接管。走闸门端口的实例在重启期间连不上，但只会连不上，不会走错出口。这几种情况才会停止实例：在页面上点“停止”、运行 `service uninstall`、在终端里按 Ctrl-C 退出前台运行的 SandGate。
+> [!NOTE]
+> **重启 SandGate 不会终止实例。** 实例继续运行，新进程启动后核对进程号和启动时间，再重新接管。走闸门端口的实例在重启期间连不上，但只会连不上，不会走错出口。这几种情况才会停止实例：在页面上点“停止”、运行 `service uninstall`、在终端里按 Ctrl-C 退出前台运行的 SandGate。
 
 页面文件和网络配置的修改不需要重启 SandGate。只有 `src/` 下的代码更新才需要：
 
@@ -471,7 +526,11 @@ SandGate 还会修改 Clash Verge 当前配置的脚本扩展（`profiles/` 下�
 
 ### 2026-11-04 的内核死锁
 
-早期版本用 `user root` 放行 Clash 核心，导致了内核死锁和 panic。**任何 pf 规则都不能使用 `user` 或 `group`，脚本在加载前也会检查。**
+> [!CAUTION]
+> 早期版本用 `user root` 放行 Clash 核心，导致了内核死锁和 panic。**任何 pf 规则都不能使用 `user` 或 `group`，脚本在加载前也会检查。**
+
+<details>
+<summary>死锁是怎么形成的</summary>
 
 在 macOS 上，这类规则让发包路径调用 `pf_socket_lookup`，在持有其他锁时阻塞等待 TCP 的 pcbinfo 锁。panic 快照里的循环等待如下：
 
@@ -481,6 +540,8 @@ SandGate 还会修改 Clash Verge 当前配置的脚本扩展（`profiles/` 下�
 随后所有联网进程都堵在后面，`configd` 180 秒无响应，看门狗触发 panic。死锁约在 panic 前 593 秒形成，`pfctl` 是之后才被堵住的，定时重载不是起因。这是偶发的时序问题，短时间试运行通过不代表安全。
 
 锁的身份由调用栈形状和 xnu 开源代码对照得出，内核文件没有这些内部函数的符号。
+
+</details>
 
 ### 为什么这样设计
 
@@ -521,3 +582,7 @@ npm test
 - **测试不碰真实环境：** `background: false` 时不启动守卫和探测，也不会同步到 Clash。
 - **依赖真实 `sandbox-exec` 的测试**在嵌套沙盒中会自动跳过。
 - **`scripts/pf-probe.sh` 已停用：** 它用的 `user` 规则就是上面死锁的原因。
+
+## 许可证
+
+[GPL-3.0-or-later](LICENSE) © 2026 杨泽恩
