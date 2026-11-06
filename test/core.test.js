@@ -208,7 +208,7 @@ describe('Seatbelt profile', () => {
   test('protected paths come after the write allows, so they win', () => {
     const p = buildProfile(app({ restrictWrites: true, writable: ['/Users/t'] }), opts);
     assert.ok(p.indexOf('.sandgate"') > p.indexOf('(allow file-write* (subpath "/Users/t"))'));
-    assert.match(p, /\.ssh/);
+    assert.match(p, /\.aws/);
   });
 
   test('NO_PROXY is stripped and proxy variables point at the gate', () => {
@@ -792,7 +792,7 @@ describe('instance isolation', () => {
 
     test('still hides other instances and protected paths', () => {
       assert.ok(p.includes('(deny file-read* file-write* (subpath "/Users/t/.sandgate-instances"))'));
-      assert.ok(p.includes('(deny file-read* file-write* (subpath "/Users/t/.ssh"))'));
+      assert.ok(p.includes('(deny file-read* file-write* (subpath "/Users/t/.aws"))'));
     });
 
     test('{data} still points at the instance directory, so Chrome gets its own profile', () => {
@@ -830,8 +830,8 @@ describe('instance isolation', () => {
     });
 
     test('a protected path wins over a shared folder', () => {
-      const p = buildProfile(app({ shared: ['/Users/t/.ssh'] }), cloneOpts);
-      assert.ok(p.lastIndexOf(deny('/Users/t/.ssh')) > p.indexOf(rw('/Users/t/.ssh')));
+      const p = buildProfile(app({ shared: ['/Users/t/.aws'] }), cloneOpts);
+      assert.ok(p.lastIndexOf(deny('/Users/t/.aws')) > p.indexOf(rw('/Users/t/.aws')));
     });
 
     test('a program inside the home folder can run but not be written to', () => {
@@ -2038,7 +2038,7 @@ tun:
       for (const network of ['open', 'rules']) {
         const p = buildProfile(inst({ network, node: network === 'rules' ? 'sgp-abc' : '' }), sb);
         assert.ok(p.includes('(deny file-read* file-write* (subpath "/Users/t"))'), network);
-        assert.ok(p.includes('(deny file-read* file-write* (subpath "/Users/t/.ssh"))'), network);
+        assert.ok(p.includes('(deny file-read* file-write* (subpath "/Users/t/.aws"))'), network);
       }
     });
 
@@ -2683,7 +2683,7 @@ describe('terminal commands', () => {
     const visible = buildProfile({ network: 'none', isolateHome: true, homeVisible: true, command: '/bin/sh' }, opts);
     assert.ok(visible.includes(keychain));
     assert.ok(!visible.includes(homeDeny));
-    assert.ok(visible.includes('(deny file-read* file-write* (subpath "/Users/u/.ssh"))'), 'protected paths still win');
+    assert.ok(visible.includes('(deny file-read* file-write* (subpath "/Users/u/.aws"))'), 'protected paths still win');
     assert.ok(visible.includes('(subpath "/sg-instances")'), 'other instances stay hidden');
     const shared = buildProfile({ network: 'none', isolateHome: false, command: '/bin/sh' }, opts);
     assert.ok(shared.includes(keychain), 'shared data cannot read the keychain folder either');
@@ -3031,7 +3031,7 @@ describe('allowing the keychain', () => {
     assert.ok(off.includes(keychainDeny) && off.includes(toolDeny));
     const on = buildProfile({ ...base, allowKeychain: true }, opts);
     assert.ok(!on.includes(keychainDeny) && !on.includes(toolDeny));
-    assert.ok(on.includes('(deny file-read* file-write* (subpath "/Users/u/.ssh"))'), 'other protected paths stay');
+    assert.ok(on.includes('(deny file-read* file-write* (subpath "/Users/u/.aws"))'), 'other protected paths stay');
     const env = buildEnv({ ...base, allowKeychain: true, env: {} }, null, { HOME: '/Users/u', PATH: '/usr/bin' }, '/sg-i/a');
     assert.equal(env.PATH, '/usr/bin');
   });
@@ -3052,26 +3052,14 @@ describe('allowing the keychain', () => {
   });
 });
 
-describe('allowing ~/.ssh', () => {
-  const opts = { sandgateDir: '/sg', instancesDir: '/sg-i', instanceHome: '/sg-i/a', home: '/Users/u', tempDir: '/private/tmp' };
-  const sshDeny = '(deny file-read* file-write* (subpath "/Users/u/.ssh"))';
-
-  test('off by default; on, only ~/.ssh opens and the other protected paths stay', () => {
-    const base = { network: 'none', isolateHome: false, command: '/bin/sh' };
-    assert.ok(buildProfile(base, opts).includes(sshDeny));
-    const on = buildProfile({ ...base, allowSsh: true }, opts);
-    assert.ok(!on.includes(sshDeny));
-    assert.ok(on.includes('(deny file-read* file-write* (subpath "/Users/u/.aws"))'));
-    assert.ok(on.includes('(deny file-read* file-write* (subpath "/Users/u/Library/Keychains"))'), 'the keychain is a separate choice');
-  });
-
-  test('a clone that hides your home gets ~/.ssh back; the option needs the sandbox', () => {
-    const on = buildProfile({ network: 'none', isolateHome: true, allowSsh: true, command: '/bin/sh' }, opts);
-    assert.ok(on.includes('(allow file-read* file-write* (subpath "/Users/u/.ssh"))'));
-    const base = { name: 'x', command: '/bin/sh', network: 'none' };
-    const a = validateApp({ ...base, allowSsh: true });
-    assert.equal(a.allowSsh, true);
-    assert.equal(validateApp(base, a).allowSsh, true);
-    assert.equal(validateApp({ ...base, network: 'open', unsandboxed: true, allowSsh: true }).allowSsh, false);
+describe('~/.ssh', () => {
+  test('is open to every sandboxed instance, so ssh reaches your servers', () => {
+    const opts = { sandgateDir: '/sg', instancesDir: '/sg-i', instanceHome: '/sg-i/a', home: '/Users/u', tempDir: '/private/tmp' };
+    const shared = buildProfile({ network: 'none', isolateHome: false, command: '/bin/sh' }, opts);
+    assert.ok(!shared.includes('/Users/u/.ssh'));
+    assert.ok(shared.includes('(deny file-read* file-write* (subpath "/Users/u/.aws"))'), 'the other protected paths stay');
+    const clone = buildProfile({ network: 'none', isolateHome: true, command: '/bin/sh' }, opts);
+    assert.ok(clone.includes('(allow file-read* file-write* (subpath "/Users/u/.ssh"))'), 'even a clone that hides your home');
+    assert.ok(clone.indexOf('(subpath "/Users/u/.ssh"))') > clone.indexOf('(deny file-read* file-write* (subpath "/Users/u"))'));
   });
 });

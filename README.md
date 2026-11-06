@@ -322,7 +322,7 @@ SandGate 也会接管配置里名字以 `sandgate-` 或 `sgp-` 开头的端口�
 | 能否访问你的用户目录 | 默认不能，只有实例目录、工作目录和共享文件夹可以；勾选“分身也能读写你的用户目录”后可以 | 能，和直接打开程序一样 |
 | 钥匙串工具 `/usr/bin/security` | 不能运行，见下文 | 不能运行，见下文 |
 | 配置、缓存、登录状态 | 存在实例目录 | 存在原来的位置 |
-| 受保护目录（`.ssh`、钥匙串等） | 不可访问 | 不可访问 |
+| 受保护目录（`.aws`、`.gnupg`、钥匙串等） | 不可访问 | 不可访问 |
 | 其他实例的目录 | 不可访问 | 不可访问 |
 
 > [!CAUTION]
@@ -357,7 +357,7 @@ Claude Code 预设默认共用这些路径：
 
 套沙盒的实例都不能用钥匙串：钥匙串目录受保护，而且钥匙串按用户划分，实例不可能有自己的一份。所以实例里 `/usr/bin/security` 也不能运行，`PATH` 最前面换成 SandGate 自带的替身 `libexec/no-keychain/security`：查询一律回答“找不到”（退出码 44），修改一律失败（退出码 1）。用这个工具保存登录的程序（比如 Claude Code）会因此把登录存在文件里（分身是它的 `HOME` 下，共用数据模式下是程序配置目录里，比如 `CLAUDE_CONFIG_DIR`）。Claude Code 只接受“成功”“找不到”“钥匙串已锁定”这几种回答，工具无法运行或返回其他错误时，它会放弃保存登录，提示 “Couldn't save your login”。所以只禁止运行真正的工具不够，必须有这个替身。
 
-要用 ssh 连服务器的实例，可以在设置里打开“允许使用 ~/.ssh”（默认关闭）。打开后 ssh 能读到 `config`、`known_hosts` 和私钥，和不套沙盒时一样；代价是沙盒里的程序也能读到私钥。其他受保护目录（`.aws`、`.gnupg`、钥匙串等）不受影响。
+`~/.ssh` 不受保护，所有实例里的 ssh 都能读到 `config`、`known_hosts` 和私钥，可以照常连服务器；看不到用户目录的分身也单独放行了它，因为 ssh 按系统用户记录找 `~/.ssh`，不看 `HOME`。代价是沙盒里的程序也能读到私钥。
 
 需要钥匙串的实例可以在设置里打开“允许使用钥匙串”（默认关闭）。打开后，这个实例不再禁止访问 `~/Library/Keychains`，也不用替身，git 的 `osxkeychain`、`gh` 等都能取到你存的密码和令牌。代价是沙盒里的程序能读到钥匙串里所有不需要你确认的条目，和不套沙盒时一样。Claude Code 设了 `CLAUDE_CONFIG_DIR` 时，它在钥匙串里的条目名是 `Claude Code-credentials-<目录路径 sha256 的前 8 位>`，每个实例一条，不会和主环境不带后缀的那条混用（Claude Code 2.1.319 的代码里是这样算的）。原来存在文件里的登录，下次写入时会搬进钥匙串，不用重新登录。只在共用数据模式下用过；分身改了 `HOME`，钥匙串是否正常没有测过。
 
@@ -467,7 +467,7 @@ node bin/sandgate.js alias install
 
 **实际出口不定时检查，需要时在「网络配置」页点“检查出口”。** 它经这份配置的入口访问 `api.anthropic.com` 和 `claude.ai` 的 `/cdn-cgi/trace` 页面，显示各自的出口 IP 和国家（国家由 Cloudflare 根据 IP 判断）。适合在改了规则、订阅更新或换了节点之后看一眼。不定时检查的原因：真实 IP 不会漏，由全机防护保证；AI 组的出口由这份配置固定；而每次检查都是从你账号的出口向对方发一次请求。只有两种情况上面的检查发现不了：`api.anthropic.com` 不再命中 AI 规则；节点名字没变，服务器换到了别的国家。
 
-预设用共用数据模式，所以 `HOME` 就是你的用户目录，Claude 里的 `~` 和命令行里的一样。环境变量设 `CLAUDE_CONFIG_DIR={data}/.claude`，Claude Code 的 `.claude`、`.claude.json` 和登录都放进实例目录 `~/.sandgate-instances/<id>/.claude`（登录文件权限 600，其他实例读不到），所以每个实例可以登录不同账号；会话记录、记忆等通过上面的共用路径和你共用一份。要在 Claude 里用 git 推送或 `gh`，打开“允许使用钥匙串”。另外还设了 `BROWSER=/usr/bin/false`（登录时只显示链接，不打开浏览器）和 `DISABLE_AUTOUPDATER=1`（更新用主环境的 `claude update`）。
+预设用共用数据模式，所以 `HOME` 就是你的用户目录，Claude 里的 `~` 和命令行里的一样。环境变量设 `CLAUDE_CONFIG_DIR={data}/.claude`，Claude Code 的 `.claude`、`.claude.json` 和登录都放进实例目录 `~/.sandgate-instances/<id>/.claude`（登录文件权限 600，其他实例读不到），所以每个实例可以登录不同账号；会话记录、记忆等通过上面的共用路径和你共用一份。预设默认打开了“允许使用钥匙串”，所以 Claude 里能用 git 推送和 `gh`，登录也存在钥匙串里这个实例自己的条目。另外还设了 `BROWSER=/usr/bin/false`（登录时只显示链接，不打开浏览器）和 `DISABLE_AUTOUPDATER=1`（更新用主环境的 `claude update`）。
 
 ### 泄漏自检
 
@@ -592,7 +592,7 @@ SandGate 还会修改 Clash Verge 当前配置的脚本扩展（`profiles/` 下�
 - **网页改不了 pf：** 网页不以 root 运行，pf 规则只能通过 sudo 执行脚本来更改。
 - **防跨站：** 校验 Host 和 Origin，防御 DNS rebinding 和 CSRF。
 - **密钥：** Clash 密钥明文存放在 `~/.sandgate`（权限 0700），API 不会返回它。
-- **实例隔离：** 实例无法读写 `~/.sandgate`、Clash Verge 配置目录、`~/.ssh`、`~/.aws`、`~/.gnupg`、钥匙串目录和其他实例的目录，看不到用户目录的分身（默认）连整个用户目录都不可见。
+- **实例隔离：** 实例无法读写 `~/.sandgate`、Clash Verge 配置目录、`~/.aws`、`~/.gnupg`、钥匙串目录（可以按实例打开）和其他实例的目录；`~/.ssh` 可以读写，ssh 才能连服务器，看不到用户目录的分身（默认）连整个用户目录都不可见。
 - **Clash 控制接口：** “全部走一个节点”的实例只能连自己的闸门端口，连不上 Clash 的 TCP 控制端口。“跟随”和“修改规则”的实例可以连本机端口，包括这个控制端口，靠密钥保护。
 - **Clash 的 Unix socket：** 只有在「配置」页把控制接口设成 Unix socket 时，沙盒才会封掉它。设成 TCP 时，Clash Verge 配置里的 `verge-mihomo.sock` 不在封禁范围，开了 Unix socket 的实例（如 Chrome 预设）在这个文件存在时可能连上。
 

@@ -23,7 +23,6 @@ export function canonical(p) {
 export function defaultProtected(sandgateDir, home = os.homedir()) {
   return [
     sandgateDir, // holds the UI token and the profiles themselves
-    path.join(home, '.ssh'),
     path.join(home, '.aws'),
     path.join(home, '.gnupg'),
     path.join(home, 'Library/Keychains'),
@@ -124,7 +123,8 @@ export function buildProfile(app, { port, sandgateDir, instancesDir = '', instan
     readWrite.push(...(app.cwd ? [app.cwd] : []), ...(app.shared ?? []), ...(app.restrictWrites ? app.writable ?? [] : []));
     readOnly.push(app.command, NO_KEYCHAIN_DIR);
     if (app.allowKeychain) readWrite.push(keychainDir);
-    if (app.allowSsh) readWrite.push(sshDir);
+    // ssh finds ~/.ssh through the user database, not HOME, so a clone needs it back too.
+    readWrite.push(sshDir);
   }
   const kept = [...readWrite, ...readOnly].map(canonical);
   const parents = new Set(kept.flatMap((p) => parentsWithin(canonical(home), p)));
@@ -137,9 +137,7 @@ export function buildProfile(app, { port, sandgateDir, instancesDir = '', instan
   }
 
   const protectedPaths = [...defaultProtected(sandgateDir, home), ...(app.protected ?? [])]
-    .filter((p) => !(app.allowKeychain && p === keychainDir) && !(app.allowSsh && p === sshDir));
-  // Chosen per instance, for ssh to your servers: keys, config and known_hosts become readable.
-  if (app.allowSsh) lines.push('', ';; ~/.ssh is allowed for this instance');
+    .filter((p) => !app.allowKeychain || p !== keychainDir);
   lines.push('', ';; protected paths always win');
   for (const p of protectedPaths) lines.push(`(deny file-read* file-write* (subpath ${sbString(canonical(p))}))`);
 

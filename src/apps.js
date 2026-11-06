@@ -463,7 +463,6 @@ export class AppManager {
     }
     const results = [{ id: 'applied', label: '沙盒配置能否加载', ok: true, detail: '已加载' }];
     if (app.allowKeychain) results.push({ id: 'keychain', label: '钥匙串', ok: true, detail: '这个实例设置了允许使用钥匙串，所以不检查' });
-    if (app.allowSsh) results.push({ id: 'ssh', label: '~/.ssh', ok: true, detail: '这个实例设置了允许使用 ~/.ssh，私钥可以读到' });
     for (const [pid, label, cmd, ...args] of denials) {
       const { code, stderr } = await runInBox(cmd, ...args);
       const blocked = cmd === NSCURL ? nscurlBlocked(code, stderr) : code !== 0;

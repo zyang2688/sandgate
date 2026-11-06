@@ -368,11 +368,12 @@ const PRESETS = {
     apply(f) { f.blockBrokers.checked = true; f.allowUnixSockets.checked = false; },
   },
   claude: {
-    note: '共用数据模式：HOME 就是你的用户目录，~ 指向它，项目照常读写。CLAUDE_CONFIG_DIR 把 Claude Code 的 .claude、.claude.json 和登录放进实例目录，所以每个实例可以登录不同账号；会话记录、记忆、设置、skills 等通过“和主环境共用的路径”和你共用一份，CloudCLI 也能看到。沙盒里钥匙串工具不能运行，登录保存在实例目录的 .claude/.credentials.json 里（权限 600，其他实例读不到）。登录时不会打开浏览器，把终端里显示的链接复制到浏览器打开。自动更新已关闭，用主环境的 claude update 更新。',
+    note: '共用数据模式：HOME 就是你的用户目录，~ 指向它，项目照常读写。CLAUDE_CONFIG_DIR 把 Claude Code 的 .claude、.claude.json 和登录放进实例目录，所以每个实例可以登录不同账号；会话记录、记忆、设置、skills 等通过“和主环境共用的路径”和你共用一份，CloudCLI 也能看到。预设打开了“允许使用钥匙串”，所以 git、gh 能取到凭据；Claude Code 的登录存在钥匙串里这个实例自己的条目（名字带配置目录的哈希），不和主账号或其他实例混用。登录时不会打开浏览器，把终端里显示的链接复制到浏览器打开。自动更新已关闭，用主环境的 claude update 更新。',
     apply(f) {
       f.command.value ||= '~/.local/bin/claude';
       f.blockBrokers.checked = true;
       f.allowUnixSockets.checked = false;
+      f.allowKeychain.checked = true; // git push, gh and the login in its own keychain item
       f.dataMode.value = 'shared';
       f.alias.value ||= 'claude';
       if (!f.env.value.trim()) f.env.value = 'CLAUDE_CONFIG_DIR={data}/.claude\nBROWSER=/usr/bin/false\nDISABLE_AUTOUPDATER=1';
@@ -416,7 +417,7 @@ function syncNetworkField({ takeTimezone = false } = {}) {
 
 const DATA_MODE_NOTES = {
   clone: '程序的 HOME 是实例目录，配置、缓存和登录状态都存在那里，删除实例时一起删除。默认看不到你的用户目录，需要交换文件时用下面的共享文件夹，或者勾选“分身也能读写你的用户目录”。',
-  shared: '程序照常使用你的用户目录，和直接打开时一样，只有网络被隔离。.ssh、钥匙串等受保护目录仍然不可访问。程序自己的配置要分开时，用它支持的环境变量指到 {data}，比如 Claude Code 的 CLAUDE_CONFIG_DIR={data}/.claude。',
+  shared: '程序照常使用你的用户目录，和直接打开时一样，只有网络被隔离。.aws、钥匙串等受保护目录仍然不可访问（钥匙串可以在下面打开）。程序自己的配置要分开时，用它支持的环境变量指到 {data}，比如 Claude Code 的 CLAUDE_CONFIG_DIR={data}/.claude。',
 };
 
 function syncSandbox() {
@@ -455,7 +456,6 @@ function fillAppForm(f, app) {
   f.blockBrokers.checked = app.blockBrokers;
   f.allowUnixSockets.checked = app.allowUnixSockets;
   f.allowKeychain.checked = Boolean(app.allowKeychain);
-  f.allowSsh.checked = Boolean(app.allowSsh);
   f.restrictWrites.checked = app.restrictWrites;
   f.writable.value = app.writable.join('\n');
   f.protected.value = app.protected.join('\n');
@@ -533,7 +533,6 @@ $('app-form').addEventListener('submit', async (e) => {
     blockBrokers: f.blockBrokers.checked,
     allowUnixSockets: f.allowUnixSockets.checked,
     allowKeychain: f.allowKeychain.checked,
-    allowSsh: f.allowSsh.checked,
     restrictWrites: f.restrictWrites.checked,
     writable: lines(f.writable.value),
     protected: lines(f.protected.value),
