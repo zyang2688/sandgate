@@ -200,6 +200,7 @@
         <select name="preset">
           <option value="cli">命令行程序</option>
           <option value="chromium">Chromium / Electron 应用</option>
+          <option value="claude">Claude Code（在终端里运行）</option>
         </select>
       </label>
       <p id="preset-note" class="muted"></p>
@@ -225,6 +226,10 @@
       <label>参数（每行一个；{port} 为闸门端口，{data} 为实例目录，{home} 为程序的用户目录）<textarea name="args" rows="3" spellcheck="false"></textarea></label>
       <label>工作目录 <input name="cwd" spellcheck="false" placeholder="~/project"></label>
       <label>环境变量（每行 KEY=VALUE）<textarea name="env" rows="2" spellcheck="false"></textarea></label>
+      <label>终端命令（留空则不建。填了以后，在终端输入这个名字就会在当前终端里启动这个实例，例如 claude）
+        <input name="alias" spellcheck="false" autocomplete="off" maxlength="32" placeholder="claude">
+      </label>
+      <p class="muted">运行一次 <code>node bin/sandgate.js alias install</code> 让 ~/.zshrc 加载这些命令。一个终端命令同一时间只指向一个实例：给另一个实例填同样的命令，会问你是否改过来，这就是切换账号；同一程序的其他实例卡片上也有“改用这个”按钮。改指向后，已经打开的终端里也立刻生效；新加的命令名要新开终端。从终端启动的实例用你当前的目录和参数，可以同时开多个，不会显示为“运行中”。</p>
       <label class="check"><input type="checkbox" name="unsandboxed"> 不套沙盒（默认关闭）</label>
       <p id="unsandboxed-note" class="warn-note" hidden>程序能读写你的所有文件，网络也不由系统强制：走代理的流量走选定的出口，绕过代理的走 Clash 主规则。数据环境固定为共用数据：HOME 就是你的用户目录，没有分身；但参数里的 {data} 仍指向实例自己的目录，所以 Chrome 预设的 --user-data-dir 仍和主 Chrome 分开存放，Cookie 和登录状态也是实例自己的。适合 Chrome 这类自带沙盒的程序，这样它的沙盒和钥匙串都能保留，启动时会自动去掉 --no-sandbox 和 --use-mock-keychain。已有实例切换这个选项后，Chrome 的登录状态和保存的密码会读不出来，需要重新登录；可以先停止实例，用“清空数据”从头开始。不要用来运行不信任的程序。</p>
       <div id="sandbox-fields" class="stack">
@@ -235,6 +240,7 @@
         </select>
       </label>
       <p id="data-mode-note" class="muted"></p>
+      <label class="check" id="home-visible-field"><input type="checkbox" name="homeVisible"> 分身也能读写你的用户目录（HOME 仍是实例自己的，账号和配置分开；.ssh、钥匙串等受保护目录仍不可访问）</label>
       <label id="shared-field">共享文件夹（每行一个，分身可以读写，用来和主环境交换文件）<textarea name="shared" rows="2" spellcheck="false" placeholder="~/sandgate-shared"></textarea></label>
       <label class="check"><input type="checkbox" name="blockBrokers"> 禁止通过系统服务联网或拉起其他 App（GUI 应用通常需关闭）</label>
       <label class="check"><input type="checkbox" name="allowUnixSockets"> 允许 Unix socket（GUI 应用通常需开启）</label>

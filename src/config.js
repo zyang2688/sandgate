@@ -62,11 +62,19 @@ export function validTimezone(v) {
   return tz;
 }
 
+/** A terminal command name. Empty means the instance has no command. */
+export function validAlias(v) {
+  const alias = String(v ?? '').trim();
+  if (alias && !/^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/.test(alias)) fail(`终端命令名无效: ${alias}，只能用字母、数字、_ . -，且以字母或 _ 开头`);
+  return alias;
+}
+
 export function validateApp(input, existing = {}) {
   const name = String(input.name ?? '').trim();
   if (!name || name.length > 64 || hasControl(name)) fail('名称需为 1-64 个字符');
-  const command = String(input.command ?? '').trim();
-  if (!command || hasControl(command)) fail('命令不能为空');
+  const typed = String(input.command ?? '').trim();
+  if (!typed || hasControl(typed)) fail('命令不能为空');
+  const command = typed === '~' || typed.startsWith('~/') ? expandPath(typed) : typed;
   const args = input.args ?? [];
   if (!Array.isArray(args) || args.some((a) => typeof a !== 'string' || a.includes('\0'))) fail('参数必须是字符串数组');
   const env = input.env ?? {};
@@ -82,6 +90,9 @@ export function validateApp(input, existing = {}) {
   if (['gate', 'rules'].includes(network) && !node) fail('请选择节点');
   const unsandboxed = Boolean(input.unsandboxed ?? existing.unsandboxed);
   if (unsandboxed && network === 'none') fail('不套沙盒时无法禁止联网，请选其他网络配置');
+  const alias = validAlias(input.alias ?? existing.alias);
+  // Without a sandbox a moved HOME isolates nothing, and it would hide the keychain.
+  const isolateHome = !unsandboxed && input.isolateHome !== false;
   return {
     id: existing.id ?? crypto.randomBytes(5).toString('hex'),
     name,
@@ -95,8 +106,10 @@ export function validateApp(input, existing = {}) {
     node: ['gate', 'rules'].includes(network) ? node : '',
     port: existing.port ?? null,
     unsandboxed,
-    // Without a sandbox a moved HOME isolates nothing, and it would hide the keychain.
-    isolateHome: !unsandboxed && input.isolateHome !== false,
+    isolateHome,
+    // A clone whose HOME is its own while your files stay reachable: separate accounts, same projects.
+    homeVisible: isolateHome && Boolean(input.homeVisible ?? existing.homeVisible),
+    alias,
     allowUnixSockets: Boolean(input.allowUnixSockets),
     blockBrokers: input.blockBrokers !== false,
     restrictWrites: Boolean(input.restrictWrites),
@@ -194,8 +207,9 @@ export class Store {
       cleanGate.defaultNode ||= oldNode;
       if (oldPort) cleanGate.listeners = { [oldNode]: oldPort, ...cleanGate.listeners };
     }
-    const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, unsandboxed: false, shared: [], timezone: '', ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
-    const netProfiles = raw.netProfiles ?? [];
+    const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, homeVisible: false, alias: '', unsandboxed: false, shared: [], timezone: '', ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
+    // exitCheck was a periodic check that became an on-demand button.
+    const netProfiles = (raw.netProfiles ?? []).map(({ exitCheck: _gone, ...p }) => p);
     // Instances from before network profiles: each node becomes a profile, with the same behavior.
     for (const a of apps) {
       if (a.netProfile) continue;

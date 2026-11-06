@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** Escapes a value for an SBPL string literal; a stray quote would inject rules. */
 export function sbString(s) {
@@ -43,6 +44,9 @@ function parentsWithin(root, p) {
 // System daemons that do network I/O on a caller's behalf, outside its sandbox.
 const BROKER_SERVICES = ['com.apple.nsurlsessiond', 'com.apple.coreservices.launchservicesd'];
 const MDNS_SOCKET = '/private/var/run/mDNSResponder';
+export const KEYCHAIN_TOOL = '/usr/bin/security';
+/** Put first in a clone's PATH: a `security` that finds nothing, so logins go to files. */
+export const NO_KEYCHAIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '../libexec/no-keychain');
 
 /**
  * Builds the Seatbelt profile. SBPL is last-match-wins, so the order below is
@@ -90,6 +94,13 @@ export function buildProfile(app, { port, sandgateDir, instancesDir = '', instan
 
   const clone = app.isolateHome && instanceHome;
   if (clone) {
+    // The keychain is per user, so a clone cannot have one of its own. The real tool cannot
+    // run; the stand-in first in PATH answers "not found", the one answer that makes
+    // Claude Code keep its login in a file instead. A refused run makes it give up saving.
+    lines.push('', ';; clone: the keychain tool cannot run; a stand-in that finds nothing is used instead');
+    lines.push(`(deny process-exec (literal ${sbString(KEYCHAIN_TOOL)}))`);
+  }
+  if (clone && !app.homeVisible) {
     lines.push('', ';; clone: the real home folder is invisible, and the system temp directory cannot be listed');
     lines.push(`(deny file-read* file-write* (subpath ${sbString(canonical(home))}))`);
     // Chrome ignores TMPDIR for its singleton socket and exits with code 21 if the system
@@ -104,7 +115,7 @@ export function buildProfile(app, { port, sandgateDir, instancesDir = '', instan
   const readOnly = [];
   if (clone) {
     readWrite.push(...(app.cwd ? [app.cwd] : []), ...(app.shared ?? []), ...(app.restrictWrites ? app.writable ?? [] : []));
-    readOnly.push(app.command);
+    readOnly.push(app.command, NO_KEYCHAIN_DIR);
   }
   const kept = [...readWrite, ...readOnly].map(canonical);
   const parents = new Set(kept.flatMap((p) => parentsWithin(canonical(home), p)));
@@ -144,6 +155,9 @@ export function buildEnv(app, port, base = process.env, instanceHome = '') {
   }
   const home = app.isolateHome && instanceHome ? instanceHome : '';
   if (home) Object.assign(env, { HOME: home, CFFIXED_USER_HOME: home, TMPDIR: path.join(home, 'tmp') });
+  if (home) env.PATH = [NO_KEYCHAIN_DIR, ...String(base.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin').split(':').filter((d) => d && d !== NO_KEYCHAIN_DIR)].join(':');
+  // A clone that sees your files works on your repositories, so git keeps your identity.
+  if (home && app.homeVisible) env.GIT_CONFIG_GLOBAL ??= path.join(os.homedir(), '.gitconfig');
   if (app.timezone) env.TZ = app.timezone; // set before app.env, so an explicit TZ there still wins
   for (const [k, v] of Object.entries(app.env ?? {})) env[k] = expandVars(v, { port, home: home || base.HOME, data: instanceHome });
   return env;

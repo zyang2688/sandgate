@@ -7,11 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { AppManager } from './apps.js';
 import { ClashClient, ClashError, detectVerge } from './clash.js';
-import { Store, ValidationError, mergeGateSettings, validateApp } from './config.js';
-import { GateManager, defaultRouteInterface, fetchExitIp, tcpProbe } from './gate.js';
+import { Store, ValidationError, expandPath, mergeGateSettings, validAlias, validateApp } from './config.js';
+import { GateManager, defaultRouteInterface, fetchExitIp, parseTrace, tcpProbe } from './gate.js';
 import { ConnectionGuard, ProtectionProbe, ipv6Check, modeWarning } from './guard.js';
 import { ClashSync, FOLLOW, NO_NETWORK, isRuleKey, ruleKey, validateNetProfile } from './netprofile.js';
 import { PfPlanner } from './pfplan.js';
+import { writeAliases } from './terminal.js';
 
 const exec = promisify(execFile);
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -25,8 +26,11 @@ const SECURITY_HEADERS = {
   'Cache-Control': 'no-store',
 };
 
+// Claude Code's API first: its traffic matters most, and it may match other rules than the site.
+const EXIT_TRACE_URLS = ['https://api.anthropic.com/cdn-cgi/trace', 'https://claude.ai/cdn-cgi/trace'];
+
 class HttpError extends Error {
-  constructor(status, msg) { super(msg); this.status = status; }
+  constructor(status, msg, code) { super(msg); this.status = status; this.code = code; }
 }
 
 function safeEqual(a, b) {
@@ -37,13 +41,19 @@ function safeEqual(a, b) {
 
 export class Sandgate {
   /** `background: false` skips the guard and the direct-network probe, for tests. */
-  constructor({ dir, port, background = true } = {}) {
+  constructor({ dir, port, background = true, exitTraceUrls = EXIT_TRACE_URLS } = {}) {
+    this.exitTraceUrls = exitTraceUrls;
     this.store = new Store(dir);
     this.portOverride = port;
     this.background = background;
     const getSettings = () => this.store.data.gate;
     this.client = new ClashClient(getSettings().controller);
-    this.gates = new GateManager({ getSettings, client: this.client, locked: this.store.data.locked });
+    this.gates = new GateManager({
+      getSettings,
+      client: this.client,
+      locked: this.store.data.locked,
+      getRuleProfile: (node) => this.store.data.netProfiles.find((p) => p.mode !== 'node' && ruleKey(p.id) === node) ?? null,
+    });
     this.apps = new AppManager({
       store: this.store,
       gates: this.gates,
@@ -74,6 +84,8 @@ export class Sandgate {
     this.gates.sync(this.store.usedNodes());
     this.gates.start();
     await this.apps.adopt();
+    await this.#terminalPorts();
+    this.#writeAliases();
     if (this.background) {
       const stamp = () => new Date().toLocaleString('zh-CN', { hour12: false });
       this.gates.on('close', (node, reason) => console.log(`${stamp()} 闸门关闭 ${node}: ${reason}`));
@@ -137,6 +149,10 @@ export class Sandgate {
   }
 
   #authed(req) {
+    // The terminal launcher has no cookie. A browser cannot add this header cross-site
+    // without a CORS preflight, which is never answered.
+    const auth = String(req.headers.authorization ?? '');
+    if (auth.startsWith('Bearer ')) return safeEqual(auth.slice(7), this.store.token);
     const cookies = String(req.headers.cookie ?? '').split(';').map((c) => c.trim());
     const value = cookies.find((c) => c.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1);
     return value !== undefined && safeEqual(value, this.session);
@@ -196,7 +212,7 @@ export class Sandgate {
     } catch (e) {
       const status = e instanceof HttpError ? e.status : e instanceof ValidationError ? 400 : e instanceof ClashError ? 502 : 500;
       if (status === 500) console.error(e);
-      if (!res.headersSent) this.#json(res, status, { error: e.message });
+      if (!res.headersSent) this.#json(res, status, { error: e.message, ...(e instanceof HttpError && e.code ? { code: e.code } : {}) });
       else res.end();
     }
   }
@@ -216,19 +232,24 @@ export class Sandgate {
       case 'POST /api/gate/exit-ip': return this.#exitIp(await this.#body(req));
       case 'POST /api/guard/accept-rules': this.guard.acceptRules(); return this.guard.status;
       case 'POST /api/apps': return this.#createApp(await this.#body(req));
+      case 'POST /api/terminal': return this.#terminal(await this.#body(req));
       case 'GET /api/netprofiles/options': return this.#netOptions();
       case 'POST /api/netprofiles': return this.#createNetProfile(await this.#body(req));
       case 'POST /api/netprofiles/sync': return this.clashSync.apply();
     }
-    const np = url.pathname.match(/^\/api\/netprofiles\/([0-9a-f]+)$/);
+    const np = url.pathname.match(/^\/api\/netprofiles\/([0-9a-f]+)(?:\/(exit-check))?$/);
     if (np) {
       const profile = this.store.data.netProfiles.find((p) => p.id === np[1]);
       if (!profile) throw new HttpError(404, '配置不存在');
+      if (np[2]) {
+        if (req.method === 'POST') return this.#checkProfileExit(profile);
+        throw new HttpError(405, '方法不允许');
+      }
       if (req.method === 'PUT') return this.#updateNetProfile(profile, await this.#body(req));
       if (req.method === 'DELETE') return this.#deleteNetProfile(profile);
       throw new HttpError(405, '方法不允许');
     }
-    const m = url.pathname.match(/^\/api\/apps\/([0-9a-f]+)(?:\/(start|stop|verify|logs|profile|clear-data))?$/);
+    const m = url.pathname.match(/^\/api\/apps\/([0-9a-f]+)(?:\/(start|stop|verify|logs|profile|clear-data|alias))?$/);
     if (!m) throw new HttpError(404, '未找到');
     const [, id, action] = m;
     const app = this.apps.find(id);
@@ -239,11 +260,13 @@ export class Sandgate {
       case 'DELETE ': {
         await this.apps.remove(id);
         this.gates.sync(this.store.usedNodes());
+        this.#writeAliases();
         return undefined;
       }
       case 'POST start': return this.apps.start(id);
       case 'POST stop': return this.apps.stop(id);
       case 'POST clear-data': return this.apps.clearData(id);
+      case 'POST alias': return this.#takeAlias(app, await this.#body(req));
       case 'POST verify': return this.apps.verify(id);
       case 'GET logs': return { text: this.apps.tail(id) };
       case 'GET profile': return { text: this.apps.profileFor(app) };
@@ -350,12 +373,15 @@ export class Sandgate {
   async #createApp(body) {
     const before = Object.keys(this.store.data.gate.listeners).length;
     const app = validateApp({ ...body, ...this.#netFields(body) });
+    const aliasMovedFrom = this.#claimAlias(app, body.takeAlias === true);
     this.store.data.apps.push(app);
     this.#assignPorts(app);
     this.store.save();
     this.gates.sync(this.store.usedNodes());
     await this.#syncIfNewListener(before);
-    return this.apps.snapshot(app);
+    await this.#terminalPorts();
+    this.#writeAliases();
+    return { ...this.apps.snapshot(app), aliasMovedFrom };
   }
 
   async #netOptions() {
@@ -415,6 +441,26 @@ export class Sandgate {
     return { profile, sync, dropped: users.length };
   }
 
+  /**
+   * One look at where this profile's traffic leaves, on request only: each check is a
+   * request to these sites from the account's own exit. Cloudflare's trace page reports
+   * the IP and the country it places that IP in.
+   */
+  async #checkProfileExit(profile) {
+    const port = this.store.data.gate.listeners[profile.mode === 'node' ? profile.node : ruleKey(profile.id)];
+    if (!port) throw new HttpError(404, '这个配置还没有入口端口，先同步到 Clash');
+    const results = await Promise.all(this.exitTraceUrls.map(async (url) => {
+      const host = new URL(url).hostname;
+      try {
+        const { ip, loc } = parseTrace(await fetchExitIp(port, url));
+        return ip || loc ? { host, ip, loc } : { host, error: '无响应' };
+      } catch (e) {
+        return { host, error: e.killed ? '超时' : '请求失败' };
+      }
+    }));
+    return { port, results };
+  }
+
   async #deleteNetProfile(profile) {
     const users = this.#profileApps(profile.id);
     if (users.length) throw new HttpError(409, `还有实例在用这个配置：${users.map((a) => a.name).join('、')}`);
@@ -435,13 +481,71 @@ export class Sandgate {
     const next = validateApp({ ...body, ...this.#netFields(body, app) }, app);
     const networkChanged = next.network !== app.network || next.node !== app.node;
     if (networkChanged && this.apps.isRunning(app.id)) throw new HttpError(409, '请先停止应用再改节点或网络模式');
+    const aliasMovedFrom = this.#claimAlias(next, body.takeAlias === true);
     if (!['gate', 'rules'].includes(next.network)) await this.apps.releasePort(app.id);
     Object.assign(app, next);
     this.#assignPorts(app);
     this.store.save();
     this.gates.sync(this.store.usedNodes());
     await this.#syncIfNewListener(before);
-    return this.apps.snapshot(app);
+    await this.#terminalPorts();
+    this.#writeAliases();
+    return { ...this.apps.snapshot(app), aliasMovedFrom };
+  }
+
+  /**
+   * A terminal command points at one instance at a time. Taking it moves it here, which is
+   * how you switch accounts; without `take` a clash is refused, naming the current holder.
+   */
+  #claimAlias(app, take) {
+    const other = app.alias && this.store.data.apps.find((a) => a.id !== app.id && a.alias === app.alias);
+    if (!other) return null;
+    if (!take) throw new HttpError(409, `终端命令 ${app.alias} 现在指向「${other.name}」`, 'alias-taken');
+    other.alias = '';
+    return other.name;
+  }
+
+  /** Points a terminal command at this instance, taking it from whichever had it. */
+  async #takeAlias(app, { alias }) {
+    const next = { ...app, alias: validAlias(alias) };
+    if (!next.alias) throw new ValidationError('请填终端命令');
+    const movedFrom = this.#claimAlias(next, true);
+    app.alias = next.alias;
+    this.store.save();
+    await this.#terminalPorts();
+    this.#writeAliases();
+    return { alias: app.alias, movedFrom };
+  }
+
+  /**
+   * Instances with a terminal command keep their gate port up, since SandGate does not see
+   * those runs start and a restart must not leave a running one without its port.
+   */
+  async #terminalPorts() {
+    for (const app of this.store.data.apps.filter((a) => a.alias)) {
+      try {
+        await this.apps.ensurePort(app);
+      } catch (e) {
+        console.error(`实例 ${app.name} 的闸门端口无法打开：${e.message}`);
+      }
+    }
+  }
+
+  #writeAliases() {
+    try {
+      writeAliases(this.store);
+    } catch (e) {
+      console.error(`终端别名没有写入：${e.message}`);
+    }
+  }
+
+  /** Finds the instance by ID or by its terminal command, for bin/sandgate-run. */
+  async #terminal({ name, cwd }) {
+    const key = String(name ?? '');
+    // The command name first: that is what the aliases and executables pass.
+    const app = this.store.data.apps.find((a) => a.alias && a.alias === key) ?? this.store.data.apps.find((a) => a.id === key);
+    if (!app) throw new HttpError(404, `没有这个实例：${key}`);
+    return this.apps.terminalLaunch(app.id, cwd ? expandPath(String(cwd)) : '');
   }
 
   async #preflight() {

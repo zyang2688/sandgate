@@ -34,6 +34,13 @@ export function defaultRouteInterface() {
   return value;
 }
 
+/** `ip=` and `loc=` from a Cloudflare trace; any other answer is taken as a bare IP. */
+export function parseTrace(text) {
+  const fields = Object.fromEntries(String(text).split('\n').map((l) => l.trim().split('=')).filter((kv) => kv.length === 2));
+  if (fields.ip || fields.loc) return { ip: fields.ip ?? '', loc: (fields.loc ?? '').toUpperCase() };
+  return { ip: String(text).trim(), loc: '' };
+}
+
 export async function fetchExitIp(upstreamPort, url) {
   // Generous: a TLS handshake through a node to this service has been seen taking 5.8 s.
   const { stdout } = await exec('/usr/bin/curl', ['-s', '--max-time', '12', '-x', `http://127.0.0.1:${upstreamPort}`, url], { timeout: 14000 });
@@ -107,7 +114,48 @@ function confirmOnce(run) {
 }
 
 /** Health checks for one node's gate. Each `run` returns a detail or throws why it failed. */
-export function buildChecks(settings, client, node) {
+/** Follows a group's current choice down to a node, like claude-guard's walk_leaf. */
+export function leafOf(proxies, name) {
+  const seen = new Set();
+  let cur = name;
+  while (Array.isArray(proxies[cur]?.all) && proxies[cur].now && !seen.has(cur)) {
+    seen.add(cur);
+    cur = proxies[cur].now;
+  }
+  return cur;
+}
+
+/**
+ * The checks claude-guard ran before every connection, for every rule profile: Clash in
+ * rule mode with IPv6 off, and every replaced exit still in Clash. They ask only the local
+ * controller. The exits are read on each run, so editing the profile needs no rebuild.
+ */
+export function strictChecks(client, profile) {
+  return [
+    {
+      id: 'clash-mode', label: 'Clash 规则模式、IPv6 关闭', intervalMs: 2000, timeoutMs: 3000,
+      run: async () => {
+        const c = await client.configs();
+        const mode = String(c.mode ?? '').toLowerCase();
+        if (mode && mode !== 'rule') throw new Error(`Clash 当前不是 Rule 模式（${mode}）`);
+        if (c.ipv6 === true) throw new Error('Clash IPv6 已开启');
+        return 'rule 模式，IPv6 关闭';
+      },
+    },
+    {
+      id: 'targets', label: '替换的出口存在', intervalMs: 2000, timeoutMs: 3000,
+      run: async () => {
+        const targets = [...new Set(Object.values(profile.exits ?? {}))];
+        const { proxies } = await client.request('/proxies');
+        const missing = targets.filter((t) => !proxies?.[t]);
+        if (missing.length) throw new Error(`Clash 里没有 ${missing.join('、')}`);
+        return targets.map((t) => { const leaf = leafOf(proxies, t); return leaf === t ? t : `${t} → ${leaf}`; }).join('，') || '无';
+      },
+    },
+  ];
+}
+
+export function buildChecks(settings, client, node, profile = null) {
   const g = settings;
   const port = g.listeners[node];
   const ruleBased = isRuleKey(node);
@@ -143,7 +191,12 @@ export function buildChecks(settings, client, node) {
       },
     });
   }
-  if (ruleBased) return checks; // no single node is correct for its traffic
+  if (ruleBased) {
+    // No single node is right for all of its traffic, so its exit is not checked here;
+    // the profile page checks it on request.
+    if (profile) checks.push(...strictChecks(client, profile));
+    return checks;
+  }
   // Always runs so the page can say why an instance has no network. A dead node's listener
   // returns 502 and never falls back to direct, so by default this does not hold the gate.
   checks.push({
@@ -336,9 +389,10 @@ export class GateMonitor extends EventEmitter {
 
 /** One independent gate per node: a dead node only stops the instances that use it. */
 export class GateManager extends EventEmitter {
-  constructor({ getSettings, client, locked = false }) {
+  constructor({ getSettings, client, locked = false, getRuleProfile = () => null }) {
     super();
     this.getSettings = getSettings;
+    this.getRuleProfile = getRuleProfile;
     this.client = client;
     this.locked = locked;
     this.started = false;
@@ -358,7 +412,7 @@ export class GateManager extends EventEmitter {
     for (const node of wanted) {
       if (this.monitors.has(node)) continue;
       const mon = new GateMonitor({
-        checks: buildChecks(this.getSettings(), this.client, node),
+        checks: buildChecks(this.getSettings(), this.client, node, this.getRuleProfile(node)),
         stableMs: this.#stableMs(),
         locked: this.locked,
       });
@@ -371,7 +425,12 @@ export class GateManager extends EventEmitter {
 
   /** Rebuilds every gate from current settings, closing each until it re-passes. */
   reconfigure() {
-    for (const [node, mon] of this.monitors) mon.configure(buildChecks(this.getSettings(), this.client, node), this.#stableMs());
+    for (const node of this.monitors.keys()) this.reconfigureNode(node);
+  }
+
+  /** Rebuilds one gate, for a change that affects only its own checks. */
+  reconfigureNode(node) {
+    this.monitors.get(node)?.configure(buildChecks(this.getSettings(), this.client, node, this.getRuleProfile(node)), this.#stableMs());
   }
 
   isOpen(node) { return Boolean(this.monitors.get(node)?.open); }

@@ -1,0 +1,17 @@
+#!/bin/sh
+# Stands in for /usr/bin/security inside a SandGate clone, where the real one cannot run.
+# The keychain belongs to the user, not the clone, so every lookup finds nothing (exit 44)
+# and every change fails plainly (exit 1). Programs that save logins with this tool, such
+# as Claude Code, then keep them in a file in the clone's HOME. Any other answer, such as
+# the sandbox refusing to run the real tool, makes Claude Code give up saving the login.
+case "${1:-}" in
+  find-generic-password|find-internet-password|find-certificate|find-identity|find-key|delete-generic-password|delete-internet-password)
+    echo 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.' >&2
+    exit 44
+    ;;
+  -i)
+    cat >/dev/null # read the commands, so the caller's write does not fail on a closed pipe
+    ;;
+esac
+echo 'security: SandGate 的分身里不能使用钥匙串' >&2
+exit 1

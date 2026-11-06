@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { GatePort } from './gateport.js';
-import { buildEnv, buildProfile, expandVars } from './profile.js';
+import { KEYCHAIN_TOOL, buildEnv, buildProfile, canonical, expandVars } from './profile.js';
 
 const exec = promisify(execFile);
 const NSCURL = '/usr/bin/nscurl';
@@ -127,7 +127,7 @@ export class AppManager {
     return file;
   }
 
-  async #ensurePort(app) {
+  async ensurePort(app) {
     if (!usesPort(app) || this.ports.has(app.id)) return;
     const { id } = app;
     // Both read live state, so changing a stopped instance's node takes effect here.
@@ -144,7 +144,7 @@ export class AppManager {
     const app = this.find(id);
     if (!app) throw new Error('应用不存在');
     if (this.runs.has(id)) throw new Error('应用已在运行');
-    await this.#ensurePort(app);
+    await this.ensurePort(app);
     const profile = app.unsandboxed ? null : this.#writeProfile(app);
     const command = await resolveCommand(app.command);
     const home = this.store.instanceHome(id);
@@ -172,6 +172,35 @@ export class AppManager {
     this.#watch();
     if (child.pid) run.started = await this.processStart(child.pid);
     this.#saveRuns();
+  }
+
+  /**
+   * What a terminal needs to run this instance itself, keeping its own TTY, directory and
+   * arguments. Several can run at once and SandGate is not their parent, so they are not
+   * recorded as running; their gate port stays up while SandGate does.
+   */
+  async terminalLaunch(id, cwd = '') {
+    const app = this.find(id);
+    if (!app) throw new Error('应用不存在');
+    await this.ensurePort(app);
+    this.#prepareDataDir(app);
+    const home = this.store.instanceHome(id);
+    // A clone that hides your home folder gets the directory it was started in, unless that
+    // directory is the home folder itself or above it, which would reveal all of it.
+    const realHome = canonical(os.homedir());
+    const dir = cwd ? canonical(cwd) : '';
+    const reveals = dir && (dir === realHome || realHome.startsWith(`${dir}/`) || dir === '/');
+    const launched = { ...app, cwd: dir && !reveals ? dir : app.cwd };
+    return {
+      app: launched,
+      command: await resolveCommand(app.command),
+      sandboxExec: app.unsandboxed ? null : this.sandboxExec,
+      profile: app.unsandboxed ? null : this.profileFor(launched),
+      home,
+      port: app.port,
+      gateOpen: !usesPort(app) || this.gates.isOpen(app.node),
+      cwdShared: Boolean(dir && !reveals),
+    };
   }
 
   #logPath(id) {
@@ -208,7 +237,7 @@ export class AppManager {
       }
       this.runs.set(id, { pid: r.pid, startedAt: r.startedAt, started, waiters: [], adopted: true });
       try {
-        await this.#ensurePort(app);
+        await this.ensurePort(app);
       } catch (e) {
         console.error(`实例 ${app.name} 的闸门端口无法恢复：${e.message}`);
       }
@@ -322,7 +351,7 @@ export class AppManager {
   async verify(id) {
     const app = this.find(id);
     if (!app) throw new Error('应用不存在');
-    await this.#ensurePort(app);
+    await this.ensurePort(app);
     if (app.unsandboxed) return this.#verifyUnsandboxed(app);
     const profile = this.#writeProfile(app);
     const gateOpen = this.gates.isOpen(app.node);
@@ -359,7 +388,8 @@ export class AppManager {
       ['token', '读取 SandGate 令牌', '/bin/cat', this.store.tokenPath],
       ['peers', '列出其他实例的目录', '/bin/ls', this.store.instancesDir],
     ];
-    if (app.isolateHome) {
+    if (app.isolateHome) denials.push(['keychain', '运行钥匙串工具 (security)', KEYCHAIN_TOOL, 'list-keychains']);
+    if (app.isolateHome && !app.homeVisible) {
       denials.push(
         ['real-home', '读取真实用户目录', '/bin/ls', os.homedir()],
         ['real-home-write', '写入真实用户目录', '/usr/bin/touch', writeProbe],

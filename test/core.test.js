@@ -11,13 +11,14 @@ import { appLabel, groupApps } from '../public/grouping.js';
 import { detectVerge, ClashClient } from '../src/clash.js';
 import { Store, ValidationError, expandPath, mergeGateSettings, validateApp, DEFAULT_SETTINGS } from '../src/config.js';
 import { Sandgate } from '../src/daemon.js';
-import { GateManager, GateMonitor, PinMismatch, buildChecks, decide, verifyPin } from '../src/gate.js';
+import { GateManager, GateMonitor, PinMismatch, buildChecks, decide, leafOf, parseTrace, strictChecks, verifyPin } from '../src/gate.js';
 import { ClashSync, applySpec, buildSpec, currentScriptFile, missingTargets, renderRuntimeYaml, validateNetProfile, withManagedBlock } from '../src/netprofile.js';
 import { GatePort } from '../src/gateport.js';
 import { ConnectionGuard, findViolations, rulesFingerprint, ipv6Check, modeWarning } from '../src/guard.js';
 import { PfPlanner, parseCidrList, parseClashConfig, resolveTargets, sectionLines, unquote } from '../src/pfplan.js';
-import { buildEnv, buildProfile, expandVars, sbString } from '../src/profile.js';
+import { NO_KEYCHAIN_DIR, buildEnv, buildProfile, expandVars, sbString } from '../src/profile.js';
 import { ServiceManager, buildPlist, startMessage } from '../src/service.js';
+import { aliasFile, commandDir, findInstance, launchCommand, renderAliases, shadowedAliases, shimText, withBlock, withoutBlock, writeAliases } from '../src/terminal.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'sandgate-test-'));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -2494,13 +2495,13 @@ describe('instances outlive a SandGate restart', () => {
     pids.push(first.snapshot(a).pid);
     await first.release();
     const second = manager();
+    t.after(() => second.release()); // a failed assertion must not leave the port open and the run hanging
     await second.adopt();
     const connected = await new Promise((resolve) => {
       const c = net.connect(port, '127.0.0.1', () => { c.destroy(); resolve(true); });
-      c.on('error', () => resolve(false));
+      c.on('error', (e) => resolve(e.code));
     });
-    assert.equal(connected, true);
-    await second.release();
+    assert.equal(connected, true, `adopted=${second.isRunning(a.id)} lastExit=${JSON.stringify(second.lastExit.get(a.id))}`);
   });
 
   test('long logs are capped without stopping the instance', async (t) => {
@@ -2628,5 +2629,316 @@ describe('leak self-test', () => {
     assert.equal(nscurlBlocked(0, ''), false, 'a successful load prints nothing on stderr');
     assert.equal(nscurlBlocked(0, 'some new error format'), false, 'an unknown format raises an alarm');
     assert.equal(nscurlBlocked(71, ''), true);
+  });
+});
+
+describe('terminal commands', () => {
+  const runner = path.join(import.meta.dirname, '../bin/sandgate-run');
+  let app;
+  let dir;
+
+  const api = (pathname, { method = 'GET', body, token = app.store.token } = {}) => new Promise((resolve, reject) => {
+    const payload = body === undefined ? '' : JSON.stringify(body);
+    const req = http.request({
+      host: '127.0.0.1', port: app.port, path: pathname, method,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+    }, (res) => {
+      let t = '';
+      res.on('data', (d) => { t += d; });
+      res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(t || '{}') }));
+    });
+    req.on('error', reject);
+    req.end(payload);
+  });
+
+  before(async () => {
+    dir = tmp();
+    app = new Sandgate({ dir, port: 0, background: false });
+    await app.start();
+    // The launcher finds SandGate through the stored port, like it would on a real machine.
+    app.store.data.uiPort = app.port;
+    app.store.save();
+  });
+  after(() => app.stop());
+
+  test('command names are checked, and a home-visible clone must be a clone', () => {
+    const base = { name: 'x', command: '/bin/sh', network: 'none' };
+    assert.equal(validateApp({ ...base, alias: 'claude' }).alias, 'claude');
+    assert.equal(validateApp(base).alias, '');
+    for (const bad of ['1x', 'a b', "x'y", 'a;b', 'x'.repeat(33)]) {
+      assert.throws(() => validateApp({ ...base, alias: bad }), ValidationError, bad);
+    }
+    assert.equal(validateApp({ ...base, homeVisible: true }).homeVisible, true);
+    assert.equal(validateApp({ ...base, homeVisible: true, isolateHome: false }).homeVisible, false);
+    assert.equal(validateApp({ ...base, command: '~/.local/bin/claude' }).command, path.join(os.homedir(), '.local/bin/claude'));
+  });
+
+  test('a clone cannot run the keychain tool; a home-visible clone still sees your files', () => {
+    const opts = { sandgateDir: '/sg', instancesDir: '/sg-instances', instanceHome: '/sg-instances/a', home: '/Users/u', tempDir: '/private/tmp' };
+    const keychain = '(deny process-exec (literal "/usr/bin/security"))';
+    const homeDeny = '(deny file-read* file-write* (subpath "/Users/u"))';
+    const hidden = buildProfile({ network: 'none', isolateHome: true, command: '/bin/sh' }, opts);
+    assert.ok(hidden.includes(keychain));
+    assert.ok(hidden.includes(homeDeny));
+    const visible = buildProfile({ network: 'none', isolateHome: true, homeVisible: true, command: '/bin/sh' }, opts);
+    assert.ok(visible.includes(keychain));
+    assert.ok(!visible.includes(homeDeny));
+    assert.ok(visible.includes('(deny file-read* file-write* (subpath "/Users/u/.ssh"))'), 'protected paths still win');
+    assert.ok(visible.includes('(subpath "/sg-instances")'), 'other instances stay hidden');
+    const shared = buildProfile({ network: 'none', isolateHome: false, command: '/bin/sh' }, opts);
+    assert.ok(!shared.includes(keychain), 'shared data keeps the real keychain');
+  });
+
+  test('a clone finds the keychain stand-in first in PATH; shared data does not', () => {
+    const clone = buildEnv({ network: 'none', isolateHome: true, env: {} }, null, { HOME: '/Users/u', PATH: `/usr/bin:${NO_KEYCHAIN_DIR}:/bin` }, '/inst');
+    assert.deepEqual(clone.PATH.split(':'), [NO_KEYCHAIN_DIR, '/usr/bin', '/bin']);
+    assert.equal(buildEnv({ network: 'none', isolateHome: false, env: {} }, null, { HOME: '/Users/u', PATH: '/usr/bin' }, '/inst').PATH, '/usr/bin');
+    const hidden = buildProfile({ network: 'none', isolateHome: true, command: '/bin/sh' }, { sandgateDir: '/sg', instanceHome: '/sg-i/a', tempDir: '/private/tmp' });
+    if (NO_KEYCHAIN_DIR.startsWith(`${os.homedir()}/`)) {
+      assert.ok(hidden.includes(`(allow file-read* (subpath ${JSON.stringify(fs.realpathSync(NO_KEYCHAIN_DIR))}))`), 'a clone that hides your home can still run the stand-in');
+    }
+  });
+
+  test('the stand-in finds nothing and refuses changes, the answers Claude Code falls back on', () => {
+    const tool = path.join(NO_KEYCHAIN_DIR, 'security');
+    const run = (args, input) => { try { execFileSync(tool, args, { input, stdio: 'pipe' }); return 0; } catch (e) { return e.status; } };
+    assert.equal(run(['find-generic-password', '-a', 'u', '-w', '-s', 'Claude Code-credentials']), 44);
+    assert.equal(run(['delete-generic-password', '-a', 'u', '-s', 'x']), 44);
+    assert.equal(run(['-i'], 'add-generic-password -U -a "u" -s "x" -X "00"\n'.repeat(2000)), 1, 'reads all of stdin, then fails');
+    assert.equal(run(['add-generic-password', '-a', 'u', '-s', 'x', '-X', '00']), 1);
+    assert.equal(run(['show-keychain-info']), 1, 'not 36, which would mean a locked keychain');
+  });
+
+  test('a home-visible clone keeps your git identity unless told otherwise', () => {
+    const env = buildEnv({ network: 'none', isolateHome: true, homeVisible: true, env: {} }, null, { HOME: '/Users/u' }, '/inst');
+    assert.equal(env.HOME, '/inst');
+    assert.equal(env.GIT_CONFIG_GLOBAL, path.join(os.homedir(), '.gitconfig'));
+    const own = buildEnv({ network: 'none', isolateHome: true, homeVisible: true, env: { GIT_CONFIG_GLOBAL: '/x' } }, null, { HOME: '/Users/u' }, '/inst');
+    assert.equal(own.GIT_CONFIG_GLOBAL, '/x');
+    assert.equal(buildEnv({ network: 'none', isolateHome: true, env: {} }, null, { HOME: '/Users/u' }, '/inst').GIT_CONFIG_GLOBAL, undefined);
+  });
+
+  test('the zshrc block goes last, is idempotent, and comes out cleanly', () => {
+    const original = 'export A=1\nalias claude=\'/old/wrapper.sh\'\n';
+    const once = withBlock(original, '/sg/aliases.zsh');
+    assert.ok(once.startsWith(original));
+    assert.ok(once.endsWith("[ -r '/sg/aliases.zsh' ] && source '/sg/aliases.zsh'\n# <<< sandgate <<<\n"));
+    assert.equal(withBlock(once, '/sg/aliases.zsh'), once);
+    assert.equal(withoutBlock(once), original);
+    assert.equal(withoutBlock(original), original);
+    assert.equal(withBlock('no newline', '/f').split('\n')[0], 'no newline');
+    assert.deepEqual(shadowedAliases(once, ['claude']).map((s) => s.line), [2]);
+  });
+
+  test('aliases and executables quote every part, so odd paths stay literal', () => {
+    const odd = path.join(tmp(), "a b", "it's");
+    fs.mkdirSync(odd, { recursive: true });
+    const runnerStub = path.join(odd, 'sandgate-run');
+    fs.writeFileSync(runnerStub, '#!/bin/sh\nprintf "%s|" "$SANDGATE_NODE" "$@"\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(odd, 'claude'), shimText('claude', { runner: runnerStub, node: "/n o'de" }), { mode: 0o755 });
+    const text = renderAliases([{ id: 'abc', alias: 'claude' }, { id: 'def', alias: '' }], odd);
+    const file = path.join(tmp(), 'aliases.zsh');
+    fs.writeFileSync(file, text);
+    const out = execFileSync('/bin/zsh', ['-f', '-c', `source ${JSON.stringify(file)}\neval 'claude "x y" z'`], { encoding: 'utf8' });
+    assert.equal(out, "/n o'de|claude|x y|z|", 'the executable passes the command name, not an instance');
+    assert.equal(text.split('\n').filter((l) => l.startsWith('alias')).length, 1);
+  });
+
+  test('executables follow the commands, and only SandGate\'s own are removed', () => {
+    const store = new Store(tmp());
+    store.data.apps = [{ id: 'a1', alias: 'claude' }, { id: 'a2', alias: 'codex' }];
+    writeAliases(store);
+    const dir = commandDir(store);
+    assert.deepEqual(fs.readdirSync(dir).sort(), ['claude', 'codex']);
+    assert.equal(fs.statSync(path.join(dir, 'claude')).mode & 0o777, 0o700);
+    fs.writeFileSync(path.join(dir, 'mine'), '#!/bin/sh\necho hi\n');
+    store.data.apps[1].alias = '';
+    writeAliases(store);
+    assert.deepEqual(fs.readdirSync(dir).sort(), ['claude', 'mine']);
+  });
+
+  test('alias use finds an instance by ID, name or a unique part of the name', () => {
+    const apps = [{ id: 'aa11', name: 'Claude 账号A' }, { id: 'bb22', name: 'Claude 账号B' }, { id: 'cc33', name: 'Chrome' }];
+    assert.equal(findInstance(apps, 'bb22').id, 'bb22');
+    assert.equal(findInstance(apps, 'Chrome').id, 'cc33');
+    assert.equal(findInstance(apps, '账号A').id, 'aa11');
+    assert.throws(() => findInstance(apps, 'Claude'), /多个实例/);
+    assert.throws(() => findInstance(apps, 'zzz'), /没有名称包含/);
+  });
+
+  test('the launch command survives the shell unchanged', () => {
+    const launch = {
+      app: { name: 'n', args: ["it's", 'two words', '{data}/x'], env: { NEW: 'line\nbreak' }, network: 'none', isolateHome: true },
+      command: '/bin/echo', sandboxExec: '/usr/bin/sandbox-exec', profile: '(version 1)\n(allow default)', home: '/inst', port: null,
+    };
+    const spec = launchCommand(launch, { HOME: '/Users/u', PATH: '/bin', HTTPS_PROXY: 'http://x', SANDGATE_NODE: '/n' });
+    const words = execFileSync('/bin/sh', ['-c', 'eval "set -- $1"; for w in "$@"; do printf "%s\\0" "$w"; done', 'sh', spec], { encoding: 'utf8' }).split('\0').slice(0, -1);
+    const sb = words.indexOf('/usr/bin/sandbox-exec');
+    assert.deepEqual(words.slice(sb), ['/usr/bin/sandbox-exec', '-p', '(version 1)\n(allow default)', '/bin/echo', "it's", 'two words', '/inst/x']);
+    assert.deepEqual(words.slice(0, 2), ['/usr/bin/env', '-i']);
+    const env = words.slice(2, sb);
+    assert.ok(env.includes('HOME=/inst'));
+    assert.ok(env.includes('NEW=line\nbreak'));
+    assert.ok(!env.some((e) => e.startsWith('HTTPS_PROXY=') || e.startsWith('SANDGATE_NODE=')));
+  });
+
+  test('the launcher authenticates with the token and finds instances by command name', async () => {
+    const created = await api('/api/apps', { method: 'POST', body: { name: 'clone', command: '/bin/echo', netProfile: 'none', isolateHome: true, alias: 'cc' } });
+    assert.equal(created.status, 200, JSON.stringify(created.json));
+    assert.equal((await api('/api/terminal', { method: 'POST', body: { name: 'cc' }, token: 'wrong' })).status, 401);
+    assert.equal((await api('/api/terminal', { method: 'POST', body: { name: 'nope' } })).status, 404);
+    const project = path.join(os.homedir(), `.sandgate-test-project-${process.pid}`);
+    const r = await api('/api/terminal', { method: 'POST', body: { name: 'cc', cwd: project } });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.equal(r.json.app.id, created.json.id);
+    assert.ok(r.json.profile.includes(`(allow file-read* file-write* (subpath ${JSON.stringify(project)}))`), 'a hidden clone gets the directory it starts in');
+    assert.ok(r.json.cwdShared);
+    const fromHome = await api('/api/terminal', { method: 'POST', body: { name: 'cc', cwd: os.homedir() } });
+    assert.equal(fromHome.json.cwdShared, false, 'starting in the home folder must not reveal it');
+    assert.ok(!fromHome.json.profile.includes(`(allow file-read* file-write* (subpath ${JSON.stringify(os.homedir())}))`));
+    assert.ok(fs.existsSync(path.join(app.store.instanceHome(created.json.id), 'tmp')), 'the clone home is ready before the terminal runs it');
+  });
+
+  test('a command points at one instance; taking it moves it, which is how accounts are switched', async () => {
+    const dup = await api('/api/apps', { method: 'POST', body: { name: 'other', command: '/bin/echo', netProfile: 'none', alias: 'cc' } });
+    assert.equal(dup.status, 409);
+    assert.equal(dup.json.code, 'alias-taken');
+    assert.match(dup.json.error, /现在指向「clone」/);
+    const taken = await api('/api/apps', { method: 'POST', body: { name: 'other', command: '/bin/echo', netProfile: 'none', alias: 'cc', takeAlias: true } });
+    assert.equal(taken.status, 200, JSON.stringify(taken.json));
+    assert.equal(taken.json.aliasMovedFrom, 'clone');
+    assert.deepEqual(app.store.data.apps.filter((a) => a.alias === 'cc').map((a) => a.name), ['other']);
+    const launched = await api('/api/terminal', { method: 'POST', body: { name: 'cc' } });
+    assert.equal(launched.json.app.name, 'other', 'the next launch already goes to the new holder');
+    const cloneId = app.store.data.apps.find((a) => a.name === 'clone').id;
+    const back = await api(`/api/apps/${cloneId}/alias`, { method: 'POST', body: { alias: 'cc' } });
+    assert.deepEqual(back.json, { alias: 'cc', movedFrom: 'other' });
+    assert.equal((await api(`/api/apps/${cloneId}/alias`, { method: 'POST', body: { alias: 'bad name' } })).status, 400);
+    const otherId = app.store.data.apps.find((a) => a.name === 'other').id;
+    assert.equal((await api(`/api/apps/${otherId}`, { method: 'DELETE' })).status, 200);
+  });
+
+  test('the alias file follows the instances', async () => {
+    const text = fs.readFileSync(aliasFile(app.store), 'utf8');
+    assert.match(text, /^alias cc=/m);
+    const id = app.store.data.apps.find((a) => a.alias === 'cc').id;
+    assert.equal((await api(`/api/apps/${id}`, { method: 'PUT', body: { ...app.store.data.apps.find((a) => a.id === id), alias: '' } })).status, 200);
+    assert.doesNotMatch(fs.readFileSync(aliasFile(app.store), 'utf8'), /^alias /m);
+  });
+
+  test('sandgate-run runs the instance in place, with your directory and arguments', async () => {
+    const created = await api('/api/apps', {
+      method: 'POST',
+      body: { name: 'direct', command: '/bin/sh', args: ['-c', 'printf "%s|" "$@"; printf "pwd=%s tz=%s" "$PWD" "$TZ"; exit 7', 'sh'], netProfile: 'follow', unsandboxed: true, timezone: 'Asia/Singapore', alias: 'dd' },
+    });
+    assert.equal(created.status, 200, JSON.stringify(created.json));
+    const cwd = fs.realpathSync(tmp());
+    const result = await new Promise((resolve) => {
+      execFile(runner, ['dd', 'a', 'two words', "it's"], { cwd, env: { ...process.env, SANDGATE_HOME: dir, SANDGATE_NODE: process.execPath } }, (e, stdout, stderr) => resolve({ code: e?.code ?? 0, stdout, stderr }));
+    });
+    assert.equal(result.stdout, `a|two words|it's|pwd=${cwd} tz=Asia/Singapore`, result.stderr);
+    assert.equal(result.code, 7, 'the exit code is the program\'s');
+    // The generated executable is what CLAUDE_CLI_PATH and the aliases use; PATH needs no node.
+    const viaShim = await new Promise((resolve) => {
+      execFile(path.join(commandDir(app.store), 'dd'), ['b'], { cwd, env: { PATH: '/usr/bin:/bin', HOME: os.homedir(), SANDGATE_HOME: dir } }, (e, stdout, stderr) => resolve({ code: e?.code ?? 0, stdout, stderr }));
+    });
+    assert.equal(viaShim.stdout, `b|pwd=${cwd} tz=Asia/Singapore`, viaShim.stderr);
+    assert.equal(viaShim.code, 7);
+  });
+
+  test('sandgate-run refuses to start when SandGate is not running', async () => {
+    const off = tmp();
+    const store = new Store(off);
+    store.data.uiPort = 1; // nothing listens on port 1
+    store.save();
+    const result = await new Promise((resolve) => {
+      execFile(runner, ['x'], { env: { ...process.env, SANDGATE_HOME: off, SANDGATE_NODE: process.execPath } }, (e, stdout, stderr) => resolve({ code: e?.code ?? 0, stdout, stderr }));
+    });
+    assert.equal(result.code, 78);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /没有在运行/);
+  });
+});
+
+describe('exit check for profiles', () => {
+  const trace = 'fl=1\nh=api.anthropic.com\nip=203.0.113.9\nts=1\nloc=SG\ntls=TLSv1.3\n';
+
+  test('a Cloudflare trace gives the IP and the country; a bare answer only an IP', () => {
+    assert.deepEqual(parseTrace(trace), { ip: '203.0.113.9', loc: 'SG' });
+    assert.deepEqual(parseTrace('198.51.100.1\n'), { ip: '198.51.100.1', loc: '' });
+  });
+
+  test('profiles no longer keep a periodic exit check, and old ones lose it on load', () => {
+    const base = { name: 'p', mode: 'custom', exits: { AI: 'SG' } };
+    assert.equal('exitCheck' in validateNetProfile({ ...base, exitCheck: { url: 'https://x/', expect: 'SG' } }), false);
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ netProfiles: [{ id: 'abc', ...base, exitCheck: { url: 'https://x/', expect: 'SG' } }] }));
+    assert.equal('exitCheck' in new Store(dir).data.netProfiles[0], false);
+  });
+
+  test('every rule gate runs claude-guard\'s local checks, and none reaches out for the exit', () => {
+    const g = { ...DEFAULT_SETTINGS.gate, listeners: { 'sgp-abc': 17000 } };
+    const checks = buildChecks(g, null, 'sgp-abc', { exits: { AI: 'SG' } });
+    assert.ok(checks.some((c) => c.id === 'clash-mode') && checks.some((c) => c.id === 'targets'));
+    assert.ok(!checks.some((c) => ['exit', 'node', 'pin'].includes(c.id)));
+  });
+
+  test('one click checks the exit through the profile\'s own port', async (t) => {
+    // A stand-in for the profile's listener: answers every request with a trace.
+    const seen = [];
+    const listener = http.createServer((req, res) => { seen.push(req.url); res.end(trace); });
+    const port = await listen(listener);
+    t.after(() => listener.close());
+    // Plain http, so the stand-in sees the request itself rather than a CONNECT tunnel.
+    const app = new Sandgate({ dir: tmp(), port: 0, background: false, exitTraceUrls: ['http://api.anthropic.com/cdn-cgi/trace', 'http://claude.ai/cdn-cgi/trace'] });
+    await app.start();
+    t.after(() => app.stop());
+    const profile = { id: 'abc0000001', name: 'p', mode: 'custom', node: '', exits: { AI: 'SG' }, extraRules: [], timezone: '' };
+    app.store.data.netProfiles.push(profile);
+    app.store.data.gate.listeners['sgp-abc0000001'] = port;
+    const call = (pathname, method = 'POST') => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port: app.port, path: pathname, method, headers: { Authorization: `Bearer ${app.store.token}`, 'Content-Type': 'application/json' } }, (res) => {
+        let body = '';
+        res.on('data', (d) => { body += d; });
+        res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(body) }));
+      });
+      req.on('error', reject);
+      req.end('{}');
+    });
+    const r = await call('/api/netprofiles/abc0000001/exit-check');
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.equal(r.json.port, port);
+    assert.deepEqual(r.json.results.map((x) => [x.host, x.loc, x.ip]), [['api.anthropic.com', 'SG', '203.0.113.9'], ['claude.ai', 'SG', '203.0.113.9']]);
+    assert.ok(seen.length >= 2, 'both requests went through the profile\'s port');
+    assert.equal((await call('/api/netprofiles/abc0000001/exit-check', 'PUT')).status, 405);
+    delete app.store.data.gate.listeners['sgp-abc0000001'];
+    assert.equal((await call('/api/netprofiles/abc0000001/exit-check')).status, 404);
+  });
+});
+
+describe('claude-guard checks on rule profiles', () => {
+  const profile = { exits: { AI: 'SG_Residential', Media: 'US' } };
+  const fake = ({ mode = 'rule', ipv6 = false, proxies }) => ({
+    configs: async () => ({ mode, ipv6 }),
+    request: async () => ({ proxies }),
+  });
+  const proxies = { SG_Residential: { type: 'Socks5' }, US: { type: 'URLTest', all: ['LA-1', 'LA-2'], now: 'LA-2' }, 'LA-2': { type: 'Hysteria2' } };
+  const run = (client, id) => strictChecks(client, profile).find((c) => c.id === id).run();
+
+  test('Clash must be in rule mode with IPv6 off, as claude-guard required', async () => {
+    assert.equal(await run(fake({ proxies }), 'clash-mode'), 'rule 模式，IPv6 关闭');
+    await assert.rejects(run(fake({ mode: 'global', proxies }), 'clash-mode'), /不是 Rule 模式（global）/);
+    await assert.rejects(run(fake({ ipv6: true, proxies }), 'clash-mode'), /IPv6 已开启/);
+  });
+
+  test('every replaced exit must still exist; a group reports the node it is on', async () => {
+    assert.equal(await run(fake({ proxies }), 'targets'), 'SG_Residential，US → LA-2');
+    const { SG_Residential: _gone, ...rest } = proxies;
+    await assert.rejects(run(fake({ proxies: rest }), 'targets'), /没有 SG_Residential/);
+  });
+
+  test('a group loop does not hang the leaf walk', () => {
+    assert.equal(leafOf({ A: { all: ['B'], now: 'B' }, B: { all: ['A'], now: 'A' } }, 'A'), 'A');
+    assert.equal(leafOf({}, 'X'), 'X');
   });
 });

@@ -14,7 +14,7 @@ async function api(path, { method = 'GET', body } = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) throw new AuthError(data.error);
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { code: data.code });
   return data;
 }
 
@@ -137,6 +137,22 @@ $('app-grouping').addEventListener('change', (e) => {
   renderApps(lastApps);
 });
 
+/**
+ * An instance with a terminal command runs in a terminal. Started from here it would have
+ * none, and a program like Claude Code then exits at once, so Start explains instead.
+ */
+function startButton(a) {
+  if (a.running) return `<button class="btn" data-act="stop" data-id="${a.id}">停止</button>`;
+  return `<button class="btn primary" data-act="${a.alias ? 'terminal-hint' : 'start'}" data-id="${a.id}">启动</button>`;
+}
+
+/** Another instance of the same program holds a terminal command: one click moves it here. */
+function takeAliasButton(a) {
+  if (a.alias) return '';
+  const holder = lastApps.find((x) => x.alias && x.id !== a.id && x.command === a.command);
+  return holder ? `<button class="btn" data-act="take-alias" data-id="${a.id}" data-alias="${esc(holder.alias)}" title="现在指向「${esc(holder.name)}」">终端 ${esc(holder.alias)} 改用这个</button>` : '';
+}
+
 function appCard(a) {
   const hasGate = ['gate', 'rules'].includes(a.network);
   const net = hasGate
@@ -148,12 +164,13 @@ function appCard(a) {
     : '';
   return `<div class="app">
     <div class="app-main">
-      <div class="app-name">${esc(a.name)} <span class="badge ${a.running ? 'run' : ''}">${a.running ? `运行中 ${a.pid}` : '已停止'}</span> ${node}${a.unsandboxed ? ' <span class="badge closed">不套沙盒</span>' : ''}</div>
+      <div class="app-name">${esc(a.name)} <span class="badge ${a.running ? 'run' : ''}">${a.running ? `运行中 ${a.pid}` : '已停止'}</span> ${node}${a.unsandboxed ? ' <span class="badge closed">不套沙盒</span>' : ''}${a.alias ? ` <span class="badge">终端命令 ${esc(a.alias)}</span>` : ''}</div>
       <div class="muted mono">${esc([a.command, ...a.args.filter((x) => (a.port || !x.includes('{port}')) && !(a.unsandboxed && ['--no-sandbox', '--use-mock-keychain'].includes(x)))].join(' '))}</div>
       <div class="muted">${esc(net + exit)}</div>
     </div>
     <div class="actions">
-      <button class="btn ${a.running ? '' : 'primary'}" data-act="${a.running ? 'stop' : 'start'}" data-id="${a.id}">${a.running ? '停止' : '启动'}</button>
+      ${startButton(a)}
+      ${takeAliasButton(a)}
       <button class="btn" data-act="duplicate" data-id="${a.id}">使用相同配置新建实例</button>
       <button class="btn" data-act="verify" data-id="${a.id}">泄漏自检</button>
       <button class="btn" data-act="logs" data-id="${a.id}">日志</button>
@@ -254,6 +271,13 @@ $('apps').addEventListener('click', async (e) => {
   try {
     if (act === 'edit') return openAppDialog(app);
     if (act === 'duplicate') return openAppDialog(app, { duplicate: true });
+    if (act === 'terminal-hint') {
+      return showOutput(`启动：${app.name}`, app.alias, `请自行打开终端，切到项目目录后输入上面的命令启动（可以带参数）。这个实例在终端里运行，用的是终端当前的目录。新加的命令要新开终端才有；如果终端提示找不到命令，先运行一次 node ~/sandbox/bin/sandgate.js alias install。`);
+    }
+    if (act === 'take-alias') {
+      await api(`apps/${id}/alias`, { method: 'POST', body: { alias: btn.dataset.alias } });
+      return refresh();
+    }
     if (act === 'delete') {
       return askConfirm({
         title: `删除实例「${app.name}」？`,
@@ -332,6 +356,19 @@ const PRESETS = {
     note: '选“跟随 Clash”时程序不用任何设置。选其他配置时，程序需读取 HTTP_PROXY / ALL_PROXY。',
     apply(f) { f.blockBrokers.checked = true; f.allowUnixSockets.checked = false; },
   },
+  claude: {
+    note: '分身有自己的 HOME，所以登录、设置和对话记录都和主环境分开，每个实例可以登录不同账号；你的项目目录照常可读写。钥匙串工具在分身里不能运行，登录保存在实例目录的 .claude/.credentials.json 里（权限 600，其他实例读不到）。登录时不会打开浏览器，把终端里显示的链接复制到浏览器打开。自动更新已关闭，用主环境的 claude update 更新。',
+    apply(f) {
+      f.command.value ||= '~/.local/bin/claude';
+      f.blockBrokers.checked = true;
+      f.allowUnixSockets.checked = false;
+      f.dataMode.value = 'clone';
+      f.homeVisible.checked = true;
+      f.alias.value ||= 'claude';
+      if (!f.env.value.trim()) f.env.value = 'BROWSER=/usr/bin/false\nDISABLE_AUTOUPDATER=1';
+      syncDataMode();
+    },
+  },
   chromium: {
     note: '已加入独立的 --user-data-dir，可以多开；选“跟随 Clash”以外的配置时还会用 --proxy-server。共用数据模式也需要这个目录，否则窗口会并入已在运行的 Chrome，不走选定的节点。Chromium 自带沙盒不能嵌套，需要 --no-sandbox，渲染进程的隔离会减弱。实例不能用钥匙串，所以加了 --use-mock-keychain：登录状态能保留，但保存的密码和 Cookie 只用固定密钥加密，能读到文件的程序就能解开。',
     apply(f) {
@@ -367,7 +404,7 @@ function syncNetworkField({ takeTimezone = false } = {}) {
 }
 
 const DATA_MODE_NOTES = {
-  clone: '程序看不到你的用户目录，配置、缓存和登录状态都存在实例目录里，删除实例时一起删除。程序、临时目录也和主环境分开。需要交换文件时用下面的共享文件夹。',
+  clone: '程序的 HOME 是实例目录，配置、缓存和登录状态都存在那里，删除实例时一起删除。默认看不到你的用户目录，需要交换文件时用下面的共享文件夹，或者勾选“分身也能读写你的用户目录”。',
   shared: '程序照常使用你的用户目录，和直接打开时一样，只有网络被隔离。.ssh、钥匙串等受保护目录仍然不可访问。',
 };
 
@@ -385,7 +422,8 @@ function syncSandbox() {
 function syncDataMode() {
   const f = $('app-form');
   $('data-mode-note').textContent = DATA_MODE_NOTES[f.dataMode.value];
-  $('shared-field').hidden = f.dataMode.value !== 'clone';
+  $('shared-field').hidden = f.dataMode.value !== 'clone' || f.homeVisible.checked;
+  $('home-visible-field').hidden = f.dataMode.value !== 'clone';
 }
 
 function fillAppForm(f, app) {
@@ -399,6 +437,8 @@ function fillAppForm(f, app) {
   f.unsandboxed.checked = Boolean(app.unsandboxed);
   f.dataMode.value = app.isolateHome ? 'clone' : 'shared';
   f.shared.value = (app.shared ?? []).join('\n');
+  f.homeVisible.checked = Boolean(app.homeVisible);
+  f.alias.value = app.alias ?? '';
   f.blockBrokers.checked = app.blockBrokers;
   f.allowUnixSockets.checked = app.allowUnixSockets;
   f.restrictWrites.checked = app.restrictWrites;
@@ -444,6 +484,7 @@ function applyPreset() {
 $('app-form').preset.addEventListener('change', applyPreset);
 $('app-form').netProfile.addEventListener('change', () => syncNetworkField({ takeTimezone: true }));
 $('app-form').dataMode.addEventListener('change', syncDataMode);
+$('app-form').homeVisible.addEventListener('change', syncDataMode);
 $('app-form').unsandboxed.addEventListener('change', syncSandbox);
 $('add-app').addEventListener('click', () => openAppDialog());
 $('app-cancel').addEventListener('click', () => $('app-dialog').close());
@@ -471,21 +512,36 @@ $('app-form').addEventListener('submit', async (e) => {
     unsandboxed: f.unsandboxed.checked,
     isolateHome: f.dataMode.value === 'clone',
     shared: lines(f.shared.value),
+    homeVisible: f.dataMode.value === 'clone' && f.homeVisible.checked,
+    alias: f.alias.value.trim(),
     blockBrokers: f.blockBrokers.checked,
     allowUnixSockets: f.allowUnixSockets.checked,
     restrictWrites: f.restrictWrites.checked,
     writable: lines(f.writable.value),
     protected: lines(f.protected.value),
   };
-  try {
-    if (editingId) await api(`apps/${editingId}`, { method: 'PUT', body });
-    else await api('apps', { method: 'POST', body });
+  const save = async (extra = {}) => {
+    if (editingId) await api(`apps/${editingId}`, { method: 'PUT', body: { ...body, ...extra } });
+    else await api('apps', { method: 'POST', body: { ...body, ...extra } });
     $('app-dialog').close();
     refresh();
+  };
+  try {
+    await save();
   } catch (err) {
     if (err instanceof AuthError) return showLogin();
+    // One terminal command points at one instance; saving it here moves it, like switching accounts.
+    if (err.code === 'alias-taken') {
+      return askConfirm({
+        title: `把终端命令 ${body.alias} 改为指向「${body.name}」？`,
+        detail: `${err.message}。改了以后，新启动的 ${body.alias} 都进这个实例，原来的实例不再有终端命令；已经在运行的会话不受影响。`,
+        ok: '改过来',
+        action: () => save({ takeAlias: true }),
+      });
+    }
     $('app-error').textContent = err.message;
   }
+  return undefined;
 });
 
 // ---- Settings ------------------------------------------------------------
@@ -658,6 +714,7 @@ function renderNetProfiles(state) {
         <div class="muted">${users.length ? `使用中：${esc(users.join('、'))}` : '没有实例在用'}${p.timezone ? ` · 默认时区 ${esc(p.timezone)}` : ''}</div>
       </div>
       <div class="actions">
+        <button class="btn" data-net="exit" data-id="${esc(p.id)}" title="经这份配置访问 api.anthropic.com 和 claude.ai，看从哪里出去">检查出口</button>
         <button class="btn" data-net="edit" data-id="${esc(p.id)}">编辑</button>
         <button class="btn" data-net="delete" data-id="${esc(p.id)}" ${users.length ? 'disabled' : ''}>删除</button>
       </div>
@@ -748,6 +805,18 @@ $('net-list').addEventListener('click', async (e) => {
   const profile = netProfiles.find((p) => p.id === btn.dataset.id);
   try {
     if (btn.dataset.net === 'edit') return await openNetDialog(profile);
+    if (btn.dataset.net === 'exit') {
+      btn.disabled = true;
+      btn.textContent = '检查中…';
+      try {
+        const { port, results } = await api(`netprofiles/${profile.id}/exit-check`, { method: 'POST' });
+        const text = results.map((r) => `${r.host}\t${r.error ? r.error : `${r.loc || '国家未知'}  ${r.ip}`}`).join('\n');
+        return showOutput(`出口检查：${profile.name}`, text, `经这份配置的入口（端口 ${port}）访问 Cloudflare 的 /cdn-cgi/trace 页面，国家是 Cloudflare 根据 IP 判断的。只查这一次，不会定时检查。`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '检查出口';
+      }
+    }
     askConfirm({
       title: `删除网络配置「${profile.name}」？`,
       detail: profile.mode === 'custom' ? '它的出口替换和额外规则会一起删除，Clash 会自动重新加载。' : 'Clash 会自动重新加载。',

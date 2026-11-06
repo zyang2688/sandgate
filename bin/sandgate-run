@@ -1,0 +1,14 @@
+#!/bin/sh
+# Runs a SandGate instance in this terminal: sandgate-run <instance id or command name> [args...]
+# The instance replaces this shell process, so it keeps the terminal, Ctrl-C, Ctrl-Z and
+# its exit code, exactly as if it had been started directly.
+if [ $# -lt 1 ]; then
+  echo '用法: sandgate-run <实例 ID 或终端命令名> [参数...]' >&2
+  exit 2
+fi
+here=$(cd "$(dirname "$0")" && pwd -P) || exit 70
+name=$1
+shift
+spec=$("${SANDGATE_NODE:-node}" "$here/sandgate.js" launch "$name") || exit 78
+eval "set -- $spec \"\$@\""
+exec "$@"
