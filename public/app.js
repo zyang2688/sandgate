@@ -454,6 +454,7 @@ function fillAppForm(f, app) {
   f.linkedPaths.value = (app.linkedPaths ?? []).join('\n');
   f.blockBrokers.checked = app.blockBrokers;
   f.allowUnixSockets.checked = app.allowUnixSockets;
+  f.allowKeychain.checked = Boolean(app.allowKeychain);
   f.restrictWrites.checked = app.restrictWrites;
   f.writable.value = app.writable.join('\n');
   f.protected.value = app.protected.join('\n');
@@ -530,6 +531,7 @@ $('app-form').addEventListener('submit', async (e) => {
     linkedPaths: f.dataMode.value === 'shared' || f.homeVisible.checked ? lines(f.linkedPaths.value) : [],
     blockBrokers: f.blockBrokers.checked,
     allowUnixSockets: f.allowUnixSockets.checked,
+    allowKeychain: f.allowKeychain.checked,
     restrictWrites: f.restrictWrites.checked,
     writable: lines(f.writable.value),
     protected: lines(f.protected.value),

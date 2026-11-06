@@ -3019,3 +3019,35 @@ describe('paths a clone shares with you', () => {
     assert.deepEqual(validateApp({ ...base, network: 'open', unsandboxed: true, linkedPaths: ['.claude/projects'] }).linkedPaths, []);
   });
 });
+
+describe('allowing the keychain', () => {
+  const opts = { sandgateDir: '/sg', instancesDir: '/sg-i', instanceHome: '/sg-i/a', home: '/Users/u', tempDir: '/private/tmp' };
+  const keychainDeny = '(deny file-read* file-write* (subpath "/Users/u/Library/Keychains"))';
+  const toolDeny = '(deny process-exec (literal "/usr/bin/security"))';
+
+  test('off by default; on, the keychain folder and tool work and the stand-in is gone', () => {
+    const base = { network: 'none', isolateHome: false, command: '/bin/sh' };
+    const off = buildProfile(base, opts);
+    assert.ok(off.includes(keychainDeny) && off.includes(toolDeny));
+    const on = buildProfile({ ...base, allowKeychain: true }, opts);
+    assert.ok(!on.includes(keychainDeny) && !on.includes(toolDeny));
+    assert.ok(on.includes('(deny file-read* file-write* (subpath "/Users/u/.ssh"))'), 'other protected paths stay');
+    const env = buildEnv({ ...base, allowKeychain: true, env: {} }, null, { HOME: '/Users/u', PATH: '/usr/bin' }, '/sg-i/a');
+    assert.equal(env.PATH, '/usr/bin');
+  });
+
+  test('a clone that hides your home gets the keychain folder back', () => {
+    const on = buildProfile({ network: 'none', isolateHome: true, allowKeychain: true, command: '/bin/sh' }, opts);
+    assert.ok(on.includes('(allow file-read* file-write* (subpath "/Users/u/Library/Keychains"))'));
+    assert.ok(on.indexOf('(subpath "/Users/u/Library/Keychains"))') > on.indexOf('(deny file-read* file-write* (subpath "/Users/u"))'), 'the allow comes after the home deny');
+  });
+
+  test('is kept on edit, and means nothing without the sandbox', () => {
+    const base = { name: 'x', command: '/bin/sh', network: 'none' };
+    const a = validateApp({ ...base, allowKeychain: true });
+    assert.equal(a.allowKeychain, true);
+    assert.equal(validateApp({ ...base }, a).allowKeychain, true);
+    assert.equal(validateApp({ ...base, allowKeychain: false }, a).allowKeychain, false);
+    assert.equal(validateApp({ ...base, network: 'open', unsandboxed: true, allowKeychain: true }).allowKeychain, false);
+  });
+});

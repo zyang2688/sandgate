@@ -128,6 +128,8 @@ export function validateApp(input, existing = {}) {
     linkedPaths: !unsandboxed && (!isolateHome || Boolean(input.homeVisible ?? existing.homeVisible)) ? homeRelativeList(input.linkedPaths ?? existing.linkedPaths) : [],
     alias,
     allowUnixSockets: Boolean(input.allowUnixSockets),
+    // An unsandboxed instance has the keychain anyway; this lets a sandboxed one use it.
+    allowKeychain: !unsandboxed && Boolean(input.allowKeychain ?? existing.allowKeychain),
     blockBrokers: input.blockBrokers !== false,
     restrictWrites: Boolean(input.restrictWrites),
     writable: pathList(input.writable, '可写路径'),
@@ -224,7 +226,7 @@ export class Store {
       cleanGate.defaultNode ||= oldNode;
       if (oldPort) cleanGate.listeners = { [oldNode]: oldPort, ...cleanGate.listeners };
     }
-    const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, homeVisible: false, linkedPaths: [], alias: '', unsandboxed: false, shared: [], timezone: '', ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
+    const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, homeVisible: false, linkedPaths: [], allowKeychain: false, alias: '', unsandboxed: false, shared: [], timezone: '', ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
     // exitCheck was a periodic check that became an on-demand button.
     const netProfiles = (raw.netProfiles ?? []).map(({ exitCheck: _gone, ...p }) => p);
     // Instances from before network profiles: each node becomes a profile, with the same behavior.

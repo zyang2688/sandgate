@@ -357,6 +357,8 @@ Claude Code 预设默认共用这些路径：
 
 套沙盒的实例都不能用钥匙串：钥匙串目录受保护，而且钥匙串按用户划分，实例不可能有自己的一份。所以实例里 `/usr/bin/security` 也不能运行，`PATH` 最前面换成 SandGate 自带的替身 `libexec/no-keychain/security`：查询一律回答“找不到”（退出码 44），修改一律失败（退出码 1）。用这个工具保存登录的程序（比如 Claude Code）会因此把登录存在文件里（分身是它的 `HOME` 下，共用数据模式下是程序配置目录里，比如 `CLAUDE_CONFIG_DIR`）。Claude Code 只接受“成功”“找不到”“钥匙串已锁定”这几种回答，工具无法运行或返回其他错误时，它会放弃保存登录，提示 “Couldn't save your login”。所以只禁止运行真正的工具不够，必须有这个替身。
 
+需要钥匙串的实例可以在设置里打开“允许使用钥匙串”（默认关闭）。打开后，这个实例不再禁止访问 `~/Library/Keychains`，也不用替身，git 的 `osxkeychain`、`gh` 等都能取到你存的密码和令牌。代价是沙盒里的程序能读到钥匙串里所有不需要你确认的条目，和不套沙盒时一样。Claude Code 设了 `CLAUDE_CONFIG_DIR` 时，它在钥匙串里的条目名是 `Claude Code-credentials-<目录路径 sha256 的前 8 位>`，每个实例一条，不会和主环境不带后缀的那条混用（Claude Code 2.1.319 的代码里是这样算的）。原来存在文件里的登录，下次写入时会搬进钥匙串，不用重新登录。只在共用数据模式下用过；分身改了 `HOME`，钥匙串是否正常没有测过。
+
 分身的限制：
 
 - **应用设置不隔离。** 通过系统偏好设置服务（`NSUserDefaults`、`defaults`）保存的设置由沙盒外的 `cfprefsd` 写入，仍然落在真实的 `~/Library/Preferences`，同一程序的分身之间、分身和主环境之间共用。Chrome 的设置在它的数据目录里，不受影响。
@@ -463,7 +465,7 @@ node bin/sandgate.js alias install
 
 **实际出口不定时检查，需要时在「网络配置」页点“检查出口”。** 它经这份配置的入口访问 `api.anthropic.com` 和 `claude.ai` 的 `/cdn-cgi/trace` 页面，显示各自的出口 IP 和国家（国家由 Cloudflare 根据 IP 判断）。适合在改了规则、订阅更新或换了节点之后看一眼。不定时检查的原因：真实 IP 不会漏，由全机防护保证；AI 组的出口由这份配置固定；而每次检查都是从你账号的出口向对方发一次请求。只有两种情况上面的检查发现不了：`api.anthropic.com` 不再命中 AI 规则；节点名字没变，服务器换到了别的国家。
 
-预设用共用数据模式，所以 `HOME` 就是你的用户目录，Claude 里的 `~` 和命令行里的一样。环境变量设 `CLAUDE_CONFIG_DIR={data}/.claude`，Claude Code 的 `.claude`、`.claude.json` 和登录都放进实例目录 `~/.sandgate-instances/<id>/.claude`（登录文件权限 600，其他实例读不到），所以每个实例可以登录不同账号；会话记录、记忆等通过上面的共用路径和你共用一份。另外还设了 `BROWSER=/usr/bin/false`（登录时只显示链接，不打开浏览器）和 `DISABLE_AUTOUPDATER=1`（更新用主环境的 `claude update`）。
+预设用共用数据模式，所以 `HOME` 就是你的用户目录，Claude 里的 `~` 和命令行里的一样。环境变量设 `CLAUDE_CONFIG_DIR={data}/.claude`，Claude Code 的 `.claude`、`.claude.json` 和登录都放进实例目录 `~/.sandgate-instances/<id>/.claude`（登录文件权限 600，其他实例读不到），所以每个实例可以登录不同账号；会话记录、记忆等通过上面的共用路径和你共用一份。要在 Claude 里用 git 推送或 `gh`，打开“允许使用钥匙串”。另外还设了 `BROWSER=/usr/bin/false`（登录时只显示链接，不打开浏览器）和 `DISABLE_AUTOUPDATER=1`（更新用主环境的 `claude update`）。
 
 ### 泄漏自检
 
@@ -485,7 +487,7 @@ node bin/sandgate.js alias install
 - **全部走一个节点时没有 UDP，也没有分流。** QUIC 等 UDP 流量被拒绝，多数应用会回落到 TCP；国内网站也走这个节点。
 - **跟随或修改 Clash 规则时，实例可以直接联网。** 这时沙盒只隔离文件，走哪个出口由 Clash 决定。
 - **系统服务可能是漏点。** 应用可能通过 XPC 请求沙盒外的系统服务联网。配置拦截了已知的几个，但无法保证覆盖全部。
-- **钥匙串不可用。** `~/Library/Keychains` 被禁止访问，实例里还不能运行 `/usr/bin/security`。Chrome 加了 `--use-mock-keychain` 后能正常保持登录；Claude Code 会改为把登录存在实例目录的文件里。其他直接依赖钥匙串保存登录状态的应用可能无法登录。
+- **默认不能用钥匙串。** `~/Library/Keychains` 被禁止访问，实例里还不能运行 `/usr/bin/security`，需要时在实例设置里打开“允许使用钥匙串”。Chrome 加了 `--use-mock-keychain` 后能正常保持登录；Claude Code 会改为把登录存在实例目录的文件里。其他直接依赖钥匙串保存登录状态的应用可能无法登录。
 - **Chrome 实例的安全性比普通 Chrome 低。** `--no-sandbox` 减弱了网页和浏览器之间的隔离。`--use-mock-keychain` 不影响保持登录，实测重启后带有效期的 Cookie 还在，但它用的是固定密钥，能读到这个文件的程序就能解开。这类实例不建议登录重要账号，也不建议打开不信任的网站。
 - **Chrome 会在实例目录里安装更新程序。** 它把 `GoogleUpdater` 和对应的 LaunchAgent 文件写进实例目录。如果系统里没有同名任务，它可能被注册到沙盒之外运行。
 - **`sandbox-exec` 已被 Apple 标记为弃用。** 目前可用，但没有长期保证。

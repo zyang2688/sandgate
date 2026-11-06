@@ -244,6 +244,7 @@
       <label id="linked-field">和主环境共用的路径（相对用户目录，每行一个。每次启动时，实例目录里的这些路径会换成指向你用户目录同一位置的链接，实例原有的内容先并过去。共用数据模式下配合 CLAUDE_CONFIG_DIR={data}/.claude 这类设置使用）<textarea name="linkedPaths" rows="4" spellcheck="false" placeholder=".claude/projects"></textarea></label>
       <label id="shared-field">共享文件夹（每行一个，分身可以读写，用来和主环境交换文件）<textarea name="shared" rows="2" spellcheck="false" placeholder="~/sandgate-shared"></textarea></label>
       <label class="check"><input type="checkbox" name="blockBrokers"> 禁止通过系统服务联网或拉起其他 App（GUI 应用通常需关闭）</label>
+      <label class="check"><input type="checkbox" name="allowKeychain"> 允许使用钥匙串（默认关闭。打开后 git、gh 等能取到你存的密码和令牌，沙盒里的程序也能读到钥匙串里所有不需要你确认的条目）</label>
       <label class="check"><input type="checkbox" name="allowUnixSockets"> 允许 Unix socket（GUI 应用通常需开启）</label>
       <label class="check"><input type="checkbox" name="restrictWrites"> 只允许写入临时目录、工作目录、实例目录和下列路径</label>
       <label>可写路径（每行一个）<textarea name="writable" rows="2" spellcheck="false"></textarea></label>

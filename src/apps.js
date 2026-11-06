@@ -450,7 +450,7 @@ export class AppManager {
       ['token', '读取 SandGate 令牌', '/bin/cat', this.store.tokenPath],
       ['peers', '列出其他实例的目录', '/bin/ls', this.store.instancesDir],
     ];
-    denials.push(['keychain', '运行钥匙串工具 (security)', KEYCHAIN_TOOL, 'list-keychains']);
+    if (!app.allowKeychain) denials.push(['keychain', '运行钥匙串工具 (security)', KEYCHAIN_TOOL, 'list-keychains']);
     if (app.isolateHome && !app.homeVisible) {
       denials.push(
         ['real-home', '读取真实用户目录', '/bin/ls', os.homedir()],
@@ -462,6 +462,7 @@ export class AppManager {
       denials.push(['listener', `绕过闸门直连 listener ${listener}`, '/usr/bin/curl', ...curl, '-x', `http://127.0.0.1:${listener}`, 'http://cp.cloudflare.com/generate_204']);
     }
     const results = [{ id: 'applied', label: '沙盒配置能否加载', ok: true, detail: '已加载' }];
+    if (app.allowKeychain) results.push({ id: 'keychain', label: '钥匙串', ok: true, detail: '这个实例设置了允许使用钥匙串，所以不检查' });
     for (const [pid, label, cmd, ...args] of denials) {
       const { code, stderr } = await runInBox(cmd, ...args);
       const blocked = cmd === NSCURL ? nscurlBlocked(code, stderr) : code !== 0;
