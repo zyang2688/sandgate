@@ -340,6 +340,21 @@ SandGate 也会接管配置里名字以 `sandgate-` 或 `sgp-` 开头的端口�
 
 勾选“分身也能读写你的用户目录”后，`HOME` 仍是实例目录，所以程序的账号、设置和记录仍和主环境分开，但能读写你的项目。这时实例会自动设置 `GIT_CONFIG_GLOBAL=~/.gitconfig`，git 提交仍用你的身份；在环境变量里自己设置的值优先。
 
+能读写用户目录的分身还可以填“和主环境共用的路径”（相对用户目录，每行一个）。每次启动时，实例里的这些路径会换成指向你用户目录同一位置的链接，所以两边用的是同一份。实例里原来就有的内容不会丢：目录会并进你那边，两边都有的同名文件，实例那份改名为 `<名称>.from-<实例 id>`；文件在你那边没有时搬过去，有的话用你的那份，实例原来的留作 `<名称>.sandgate-bak`。两边都还没有的路径先不链接，等程序建出来以后，下次启动再链接。
+
+Claude Code 预设默认共用这些路径：
+
+| 路径 | 内容 | 为什么共用 |
+|---|---|---|
+| `.claude/projects` | 会话记录，以及每个项目的自动记忆（`memory/`） | CloudCLI 的会话列表和恢复会话读这里；换账号后记忆还在 |
+| `.claude/sessions` | 正在运行的会话 | CloudCLI 靠它判断会话是在后台运行（用 attach）还是要恢复 |
+| `.claude/file-history`、`.claude/tasks`、`.claude/session-env` | 会话的检查点、任务列表和环境 | 在另一个实例里恢复会话时也能用 |
+| `.claude/history.jsonl` | 输入过的提示词 | 按 ↑ 能翻到 |
+| `.claude/settings.json`、`.claude/CLAUDE.md`、`.claude/skills`、`.claude/agents`、`.claude/commands`、`.claude/plugins` | 你的设置、全局指令和扩展 | 和账号无关 |
+| `.claude/ide` | 编辑器写的连接信息 | 分身也能连上 VS Code 等编辑器 |
+
+不共用的是账号自己的东西：登录（`.claude/.credentials.json`）、`~/.claude.json`（账号信息、各项目的信任记录、MCP 服务器配置）、缓存和统计。临时目录也不共用：分身的 `TMPDIR` 是实例目录里的 `tmp/`，里面只是命令输出这类临时文件。
+
 钥匙串按用户划分，分身不可能有自己的一份，所以分身里 `/usr/bin/security` 不能运行，`PATH` 最前面换成 SandGate 自带的替身 `libexec/no-keychain/security`：查询一律回答“找不到”（退出码 44），修改一律失败（退出码 1）。用这个工具保存登录的程序（比如 Claude Code）会因此把登录存在分身 `HOME` 下的文件里。Claude Code 只接受“成功”“找不到”“钥匙串已锁定”这几种回答，工具无法运行或返回其他错误时，它会放弃保存登录，提示 “Couldn't save your login”。所以只禁止运行真正的工具不够，必须有这个替身。
 
 分身的限制：

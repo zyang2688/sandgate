@@ -41,6 +41,21 @@ export function expandPath(p, home = os.homedir()) {
   return path.normalize(expanded);
 }
 
+/** Paths under HOME a home-visible clone shares with you, such as `.claude/projects`. */
+function homeRelativeList(v) {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) fail('共用路径必须是数组');
+  const out = [];
+  for (const raw of v) {
+    const p = String(raw ?? '').trim().replace(/^~\//, '').replace(/\/+$/, '');
+    if (!p || hasControl(p) || p.startsWith('/') || p.split('/').some((s) => s === '..' || s === '.' || s === '')) {
+      fail(`共用路径需为用户目录下的相对路径，例如 .claude/projects: ${JSON.stringify(raw)}`);
+    }
+    if (!out.includes(p)) out.push(p);
+  }
+  return out;
+}
+
 const pathList = (v, label) => {
   if (v === undefined) return [];
   if (!Array.isArray(v)) fail(`${label} 必须是数组`);
@@ -109,6 +124,8 @@ export function validateApp(input, existing = {}) {
     isolateHome,
     // A clone whose HOME is its own while your files stay reachable: separate accounts, same projects.
     homeVisible: isolateHome && Boolean(input.homeVisible ?? existing.homeVisible),
+    // Only a clone that sees your home can reach what the links point to.
+    linkedPaths: isolateHome && Boolean(input.homeVisible ?? existing.homeVisible) ? homeRelativeList(input.linkedPaths ?? existing.linkedPaths) : [],
     alias,
     allowUnixSockets: Boolean(input.allowUnixSockets),
     blockBrokers: input.blockBrokers !== false,
@@ -207,7 +224,7 @@ export class Store {
       cleanGate.defaultNode ||= oldNode;
       if (oldPort) cleanGate.listeners = { [oldNode]: oldPort, ...cleanGate.listeners };
     }
-    const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, homeVisible: false, alias: '', unsandboxed: false, shared: [], timezone: '', ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
+    const apps = (raw.apps ?? []).map((a) => ({ isolateHome: false, homeVisible: false, linkedPaths: [], alias: '', unsandboxed: false, shared: [], timezone: '', ...a, node: a.node ?? (a.network === 'gate' ? oldNode ?? '' : '') }));
     // exitCheck was a periodic check that became an on-demand button.
     const netProfiles = (raw.netProfiles ?? []).map(({ exitCheck: _gone, ...p }) => p);
     // Instances from before network profiles: each node becomes a profile, with the same behavior.

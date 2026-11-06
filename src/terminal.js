@@ -167,6 +167,7 @@ export function launchCommand(launch, env) {
 export async function launchSpec(store, name, { cwd = process.cwd(), env = process.env } = {}) {
   const launch = await api(store, 'POST', '/api/terminal', { name, cwd });
   const warnings = [];
+  for (const note of launch.linkNotes ?? []) warnings.push(`SandGate：${note}`);
   if (!launch.gateOpen) warnings.push(`SandGate：「${launch.app.name}」的闸门现在是关的，程序会启动，但闸门打开前连不上网。`);
   if (launch.app.isolateHome && !launch.app.homeVisible && !launch.cwdShared) {
     warnings.push(`SandGate：「${launch.app.name}」看不到你的用户目录，当前目录 ${cwd} 也没有放行。`);

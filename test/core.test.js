@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
-import { AppManager, instanceArgs, nscurlBlocked, stopRecordedInstances } from '../src/apps.js';
+import { AppManager, instanceArgs, linkHomePaths, nscurlBlocked, stopRecordedInstances } from '../src/apps.js';
 import { appLabel, groupApps } from '../public/grouping.js';
 import { detectVerge, ClashClient } from '../src/clash.js';
 import { Store, ValidationError, expandPath, mergeGateSettings, validateApp, DEFAULT_SETTINGS } from '../src/config.js';
@@ -2940,5 +2940,75 @@ describe('claude-guard checks on rule profiles', () => {
   test('a group loop does not hang the leaf walk', () => {
     assert.equal(leafOf({ A: { all: ['B'], now: 'B' }, B: { all: ['A'], now: 'A' } }, 'A'), 'A');
     assert.equal(leafOf({}, 'X'), 'X');
+  });
+});
+
+describe('paths a clone shares with you', () => {
+  const setup = () => {
+    const root = tmp();
+    const real = path.join(root, 'real');
+    const home = path.join(root, 'inst');
+    fs.mkdirSync(real);
+    fs.mkdirSync(home);
+    const put = (base, rel, text = 'x') => { fs.mkdirSync(path.dirname(path.join(base, rel)), { recursive: true }); fs.writeFileSync(path.join(base, rel), text); };
+    const read = (base, rel) => fs.readFileSync(path.join(base, rel), 'utf8');
+    return { real, home, put, read, link: (rels) => linkHomePaths(home, rels, { realHome: real, tag: 'abc' }) };
+  };
+
+  test('a directory is merged into yours, then linked; a clash keeps both copies', () => {
+    const { real, home, put, read, link } = setup();
+    put(real, '.claude/projects/p1/a.jsonl', 'mine');
+    put(real, '.claude/projects/p2/same.jsonl', 'mine');
+    put(home, '.claude/projects/p2/same.jsonl', 'clone');
+    put(home, '.claude/projects/p3/memory/MEMORY.md', 'clone memory');
+    const notes = link(['.claude/projects']);
+    assert.equal(fs.readlinkSync(path.join(home, '.claude/projects')), path.join(real, '.claude/projects'));
+    assert.equal(read(real, '.claude/projects/p1/a.jsonl'), 'mine');
+    assert.equal(read(real, '.claude/projects/p2/same.jsonl'), 'mine');
+    assert.equal(read(real, '.claude/projects/p2/same.jsonl.from-abc'), 'clone');
+    assert.equal(read(real, '.claude/projects/p3/memory/MEMORY.md'), 'clone memory');
+    assert.equal(notes.length, 1);
+    assert.deepEqual(link(['.claude/projects']), [], 'a second run changes nothing');
+  });
+
+  test('a file moves across if you have none, and otherwise yours wins with a backup', () => {
+    const { real, home, put, read, link } = setup();
+    put(home, '.claude/history.jsonl', 'clone history');
+    put(real, '.claude/settings.json', 'my settings');
+    put(home, '.claude/settings.json', 'clone settings');
+    link(['.claude/history.jsonl', '.claude/settings.json']);
+    assert.equal(read(real, '.claude/history.jsonl'), 'clone history');
+    assert.equal(read(home, '.claude/history.jsonl'), 'clone history', 'read through the link');
+    assert.equal(read(home, '.claude/settings.json'), 'my settings');
+    assert.equal(read(home, '.claude/settings.json.sandgate-bak'), 'clone settings');
+  });
+
+  test('nothing is made for a path neither side has yet, and a wrong link is replaced', () => {
+    const { real, home, put, link } = setup();
+    link(['.claude/agents', '.claude/CLAUDE.md']);
+    assert.equal(fs.existsSync(path.join(home, '.claude/agents')), false);
+    assert.equal(fs.existsSync(path.join(real, '.claude')), false, 'your home gets no empty folders');
+    put(real, '.claude/skills/s.md');
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.symlinkSync('/nowhere', path.join(home, '.claude/skills'));
+    link(['.claude/skills']);
+    assert.equal(fs.readlinkSync(path.join(home, '.claude/skills')), path.join(real, '.claude/skills'));
+  });
+
+  test('a file on one side and a folder on the other is left alone', () => {
+    const { real, home, put, link } = setup();
+    put(real, '.claude/odd', 'file');
+    put(home, '.claude/odd/inside');
+    assert.match(link(['.claude/odd']).join(), /一个是文件一个是目录/);
+    assert.equal(fs.lstatSync(path.join(home, '.claude/odd')).isDirectory(), true);
+  });
+
+  test('only relative paths under HOME, and only for a clone that sees your home', () => {
+    const base = { name: 'x', command: '/bin/sh', network: 'none', homeVisible: true };
+    assert.deepEqual(validateApp({ ...base, linkedPaths: ['.claude/projects', '~/.claude/projects/', '.claude/skills'] }).linkedPaths, ['.claude/projects', '.claude/skills']);
+    for (const bad of ['/etc', '../x', '.claude/../..', '', 'a//b']) {
+      assert.throws(() => validateApp({ ...base, linkedPaths: [bad] }), ValidationError, bad);
+    }
+    assert.deepEqual(validateApp({ ...base, homeVisible: false, linkedPaths: ['.claude/projects'] }).linkedPaths, []);
   });
 });

@@ -241,6 +241,7 @@
       </label>
       <p id="data-mode-note" class="muted"></p>
       <label class="check" id="home-visible-field"><input type="checkbox" name="homeVisible"> 分身也能读写你的用户目录（HOME 仍是实例自己的，账号和配置分开；.ssh、钥匙串等受保护目录仍不可访问）</label>
+      <label id="linked-field">和主环境共用的路径（相对用户目录，每行一个。每次启动时，实例里的这些路径会换成指向你用户目录的链接，实例原有的内容先并过去）<textarea name="linkedPaths" rows="4" spellcheck="false" placeholder=".claude/projects"></textarea></label>
       <label id="shared-field">共享文件夹（每行一个，分身可以读写，用来和主环境交换文件）<textarea name="shared" rows="2" spellcheck="false" placeholder="~/sandgate-shared"></textarea></label>
       <label class="check"><input type="checkbox" name="blockBrokers"> 禁止通过系统服务联网或拉起其他 App（GUI 应用通常需关闭）</label>
       <label class="check"><input type="checkbox" name="allowUnixSockets"> 允许 Unix socket（GUI 应用通常需开启）</label>

@@ -29,6 +29,59 @@ export function instanceArgs(app) {
     .filter((a) => app.port || !a.includes('{port}'))
     .filter((a) => !app.unsandboxed || !SANDBOX_ONLY_ARGS.has(a));
 }
+/** Moves `from` into `to`, keeping both where names clash: the moved one gets `.from-<tag>`. */
+function mergeInto(from, to, tag, notes) {
+  for (const name of fs.readdirSync(from)) {
+    const src = path.join(from, name);
+    const dst = path.join(to, name);
+    const dstStat = fs.lstatSync(dst, { throwIfNoEntry: false });
+    if (!dstStat) { fs.renameSync(src, dst); continue; }
+    if (dstStat.isDirectory() && fs.lstatSync(src).isDirectory()) { mergeInto(src, dst, tag, notes); continue; }
+    const kept = `${dst}.from-${tag}`;
+    fs.renameSync(src, kept);
+    notes.push(`${dst} 两边都有，实例的那份放在 ${kept}`);
+  }
+  fs.rmdirSync(from);
+}
+
+/**
+ * Makes each path in a clone's HOME a link to the same path in your home, so both see one
+ * copy (Claude Code's transcripts and memory, for tools that read ~/.claude). What the clone
+ * already had is kept: a directory is merged across, and a file moves across if yours has
+ * none, or else stays beside the link as `<name>.sandgate-bak`.
+ */
+export function linkHomePaths(home, rels, { realHome = os.homedir(), tag = 'instance' } = {}) {
+  const notes = [];
+  for (const rel of rels) {
+    const inside = path.join(home, rel);
+    const real = path.join(realHome, rel);
+    let st = fs.lstatSync(inside, { throwIfNoEntry: false });
+    if (st?.isSymbolicLink() && fs.readlinkSync(inside) === real) continue;
+    if (st?.isSymbolicLink()) { fs.rmSync(inside); st = undefined; }
+    const realSt = fs.statSync(real, { throwIfNoEntry: false });
+    // Nothing on either side yet: linked on a later start, once the program has made it.
+    if (!st && !realSt) continue;
+    const isDir = st ? st.isDirectory() : realSt.isDirectory();
+    if (realSt && realSt.isDirectory() !== isDir) {
+      notes.push(`${real} 和实例里的 ${rel} 一个是文件一个是目录，没有链接`);
+      continue;
+    }
+    fs.mkdirSync(path.dirname(inside), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(path.dirname(real), { recursive: true, mode: 0o700 });
+    if (isDir) {
+      if (!realSt) fs.mkdirSync(real, { mode: 0o700 });
+      if (st) mergeInto(inside, real, tag, notes);
+    } else if (st && !realSt) {
+      fs.renameSync(inside, real);
+    } else if (st) {
+      fs.renameSync(inside, `${inside}.sandgate-bak`);
+      notes.push(`${rel} 改用你的那份，实例原来的留在 ${inside}.sandgate-bak`);
+    }
+    fs.symlinkSync(real, inside);
+  }
+  return notes;
+}
+
 const LOG_LIMIT = 10 * 1024 * 1024;
 const WATCH_MS = 2000;
 const TAIL_BYTES = 64 * 1024;
@@ -108,6 +161,7 @@ export class AppManager {
   }
 
   find(id) { return this.store.data.apps.find((a) => a.id === id); }
+  get homeDir() { return this.realHome ?? os.homedir(); }
   isRunning(id) { return this.runs.has(id); }
 
   profileFor(app) {
@@ -183,7 +237,7 @@ export class AppManager {
     const app = this.find(id);
     if (!app) throw new Error('应用不存在');
     await this.ensurePort(app);
-    this.#prepareDataDir(app);
+    const linkNotes = this.#prepareDataDir(app);
     const home = this.store.instanceHome(id);
     // A clone that hides your home folder gets the directory it was started in, unless that
     // directory is the home folder itself or above it, which would reveal all of it.
@@ -200,6 +254,7 @@ export class AppManager {
       port: app.port,
       gateOpen: !usesPort(app) || this.gates.isOpen(app.node),
       cwdShared: Boolean(dir && !reveals),
+      linkNotes,
     };
   }
 
@@ -290,6 +345,7 @@ export class AppManager {
     const usesData = [...app.args, ...Object.values(app.env)].some((v) => v.includes('{data}'));
     if (app.isolateHome || usesData) fs.mkdirSync(home, { recursive: true, mode: 0o700 });
     if (app.isolateHome) fs.mkdirSync(path.join(home, 'tmp'), { recursive: true, mode: 0o700 });
+    return app.isolateHome && app.homeVisible ? linkHomePaths(home, app.linkedPaths ?? [], { realHome: this.homeDir, tag: app.id }) : [];
   }
 
   /** Removes the definition along with the instance's data directory. */

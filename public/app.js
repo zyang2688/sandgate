@@ -351,13 +351,24 @@ $('output-close').addEventListener('click', () => $('output-dialog').close());
 
 // ---- App dialog ----------------------------------------------------------
 
+/**
+ * What a Claude Code clone shares with you: transcripts and memory, the running-session
+ * records CloudCLI reads, checkpoints, prompt history and your own settings, skills and
+ * plugins. The login (.credentials.json), ~/.claude.json and caches stay the account's own.
+ */
+const CLAUDE_SHARED = [
+  '.claude/projects', '.claude/sessions', '.claude/file-history', '.claude/tasks', '.claude/session-env',
+  '.claude/history.jsonl', '.claude/settings.json', '.claude/CLAUDE.md', '.claude/skills', '.claude/agents',
+  '.claude/commands', '.claude/plugins', '.claude/ide',
+];
+
 const PRESETS = {
   cli: {
     note: '选“跟随 Clash”时程序不用任何设置。选其他配置时，程序需读取 HTTP_PROXY / ALL_PROXY。',
     apply(f) { f.blockBrokers.checked = true; f.allowUnixSockets.checked = false; },
   },
   claude: {
-    note: '分身有自己的 HOME，所以登录、设置和对话记录都和主环境分开，每个实例可以登录不同账号；你的项目目录照常可读写。钥匙串工具在分身里不能运行，登录保存在实例目录的 .claude/.credentials.json 里（权限 600，其他实例读不到）。登录时不会打开浏览器，把终端里显示的链接复制到浏览器打开。自动更新已关闭，用主环境的 claude update 更新。',
+    note: '分身有自己的 HOME，所以每个实例可以登录不同账号；你的项目目录照常可读写。会话记录、记忆、设置、skills 等通过“和主环境共用的路径”和你共用一份，CloudCLI 也能看到；登录、~/.claude.json 和缓存是账号自己的。钥匙串工具在分身里不能运行，登录保存在实例目录的 .claude/.credentials.json 里（权限 600，其他实例读不到）。登录时不会打开浏览器，把终端里显示的链接复制到浏览器打开。自动更新已关闭，用主环境的 claude update 更新。',
     apply(f) {
       f.command.value ||= '~/.local/bin/claude';
       f.blockBrokers.checked = true;
@@ -366,6 +377,7 @@ const PRESETS = {
       f.homeVisible.checked = true;
       f.alias.value ||= 'claude';
       if (!f.env.value.trim()) f.env.value = 'BROWSER=/usr/bin/false\nDISABLE_AUTOUPDATER=1';
+      if (!f.linkedPaths.value.trim()) f.linkedPaths.value = CLAUDE_SHARED.join('\n');
       syncDataMode();
     },
   },
@@ -424,6 +436,7 @@ function syncDataMode() {
   $('data-mode-note').textContent = DATA_MODE_NOTES[f.dataMode.value];
   $('shared-field').hidden = f.dataMode.value !== 'clone' || f.homeVisible.checked;
   $('home-visible-field').hidden = f.dataMode.value !== 'clone';
+  $('linked-field').hidden = f.dataMode.value !== 'clone' || !f.homeVisible.checked;
 }
 
 function fillAppForm(f, app) {
@@ -439,6 +452,7 @@ function fillAppForm(f, app) {
   f.shared.value = (app.shared ?? []).join('\n');
   f.homeVisible.checked = Boolean(app.homeVisible);
   f.alias.value = app.alias ?? '';
+  f.linkedPaths.value = (app.linkedPaths ?? []).join('\n');
   f.blockBrokers.checked = app.blockBrokers;
   f.allowUnixSockets.checked = app.allowUnixSockets;
   f.restrictWrites.checked = app.restrictWrites;
@@ -514,6 +528,7 @@ $('app-form').addEventListener('submit', async (e) => {
     shared: lines(f.shared.value),
     homeVisible: f.dataMode.value === 'clone' && f.homeVisible.checked,
     alias: f.alias.value.trim(),
+    linkedPaths: f.dataMode.value === 'clone' && f.homeVisible.checked ? lines(f.linkedPaths.value) : [],
     blockBrokers: f.blockBrokers.checked,
     allowUnixSockets: f.allowUnixSockets.checked,
     restrictWrites: f.restrictWrites.checked,
