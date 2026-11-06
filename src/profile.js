@@ -94,6 +94,7 @@ export function buildProfile(app, { port, sandgateDir, instancesDir = '', instan
 
   const clone = app.isolateHome && instanceHome;
   const keychainDir = path.join(home, 'Library/Keychains');
+  const sshDir = path.join(home, '.ssh');
   if (app.allowKeychain) {
     // Chosen per instance, for git, gh and the like. Everything the keychain hands out
     // without asking is then readable here, as it is outside any sandbox.
@@ -123,6 +124,7 @@ export function buildProfile(app, { port, sandgateDir, instancesDir = '', instan
     readWrite.push(...(app.cwd ? [app.cwd] : []), ...(app.shared ?? []), ...(app.restrictWrites ? app.writable ?? [] : []));
     readOnly.push(app.command, NO_KEYCHAIN_DIR);
     if (app.allowKeychain) readWrite.push(keychainDir);
+    if (app.allowSsh) readWrite.push(sshDir);
   }
   const kept = [...readWrite, ...readOnly].map(canonical);
   const parents = new Set(kept.flatMap((p) => parentsWithin(canonical(home), p)));
@@ -135,7 +137,9 @@ export function buildProfile(app, { port, sandgateDir, instancesDir = '', instan
   }
 
   const protectedPaths = [...defaultProtected(sandgateDir, home), ...(app.protected ?? [])]
-    .filter((p) => !app.allowKeychain || p !== keychainDir);
+    .filter((p) => !(app.allowKeychain && p === keychainDir) && !(app.allowSsh && p === sshDir));
+  // Chosen per instance, for ssh to your servers: keys, config and known_hosts become readable.
+  if (app.allowSsh) lines.push('', ';; ~/.ssh is allowed for this instance');
   lines.push('', ';; protected paths always win');
   for (const p of protectedPaths) lines.push(`(deny file-read* file-write* (subpath ${sbString(canonical(p))}))`);
 

@@ -455,6 +455,7 @@ function fillAppForm(f, app) {
   f.blockBrokers.checked = app.blockBrokers;
   f.allowUnixSockets.checked = app.allowUnixSockets;
   f.allowKeychain.checked = Boolean(app.allowKeychain);
+  f.allowSsh.checked = Boolean(app.allowSsh);
   f.restrictWrites.checked = app.restrictWrites;
   f.writable.value = app.writable.join('\n');
   f.protected.value = app.protected.join('\n');
@@ -532,6 +533,7 @@ $('app-form').addEventListener('submit', async (e) => {
     blockBrokers: f.blockBrokers.checked,
     allowUnixSockets: f.allowUnixSockets.checked,
     allowKeychain: f.allowKeychain.checked,
+    allowSsh: f.allowSsh.checked,
     restrictWrites: f.restrictWrites.checked,
     writable: lines(f.writable.value),
     protected: lines(f.protected.value),

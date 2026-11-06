@@ -3051,3 +3051,27 @@ describe('allowing the keychain', () => {
     assert.equal(validateApp({ ...base, network: 'open', unsandboxed: true, allowKeychain: true }).allowKeychain, false);
   });
 });
+
+describe('allowing ~/.ssh', () => {
+  const opts = { sandgateDir: '/sg', instancesDir: '/sg-i', instanceHome: '/sg-i/a', home: '/Users/u', tempDir: '/private/tmp' };
+  const sshDeny = '(deny file-read* file-write* (subpath "/Users/u/.ssh"))';
+
+  test('off by default; on, only ~/.ssh opens and the other protected paths stay', () => {
+    const base = { network: 'none', isolateHome: false, command: '/bin/sh' };
+    assert.ok(buildProfile(base, opts).includes(sshDeny));
+    const on = buildProfile({ ...base, allowSsh: true }, opts);
+    assert.ok(!on.includes(sshDeny));
+    assert.ok(on.includes('(deny file-read* file-write* (subpath "/Users/u/.aws"))'));
+    assert.ok(on.includes('(deny file-read* file-write* (subpath "/Users/u/Library/Keychains"))'), 'the keychain is a separate choice');
+  });
+
+  test('a clone that hides your home gets ~/.ssh back; the option needs the sandbox', () => {
+    const on = buildProfile({ network: 'none', isolateHome: true, allowSsh: true, command: '/bin/sh' }, opts);
+    assert.ok(on.includes('(allow file-read* file-write* (subpath "/Users/u/.ssh"))'));
+    const base = { name: 'x', command: '/bin/sh', network: 'none' };
+    const a = validateApp({ ...base, allowSsh: true });
+    assert.equal(a.allowSsh, true);
+    assert.equal(validateApp(base, a).allowSsh, true);
+    assert.equal(validateApp({ ...base, network: 'open', unsandboxed: true, allowSsh: true }).allowSsh, false);
+  });
+});
