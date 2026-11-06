@@ -1,7 +1,5 @@
 <div align="center">
 
-**简体中文** · [English](README.en.md)
-
 <img src="docs/assets/logo.svg" width="112" alt="SandGate">
 
 # SandGate
