@@ -280,6 +280,16 @@ export class AppManager {
     }
   }
 
+  /**
+   * Empties the instance's data directory but keeps the instance, so its next start is like
+   * a first launch. Data a shared-data program keeps in your home folder is not touched.
+   */
+  clearData(id) {
+    if (!this.find(id)) throw new Error('应用不存在');
+    if (this.runs.has(id)) throw new Error('请先停止应用');
+    fs.rmSync(this.store.instanceHome(id), { recursive: true, force: true });
+  }
+
   /** Ends an instance's current connections; its next ones use the latest rules. */
   dropConnections(id) {
     this.ports.get(id)?.dropAll();

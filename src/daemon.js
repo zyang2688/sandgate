@@ -222,7 +222,7 @@ export class Sandgate {
       if (req.method === 'DELETE') return this.#deleteNetProfile(profile);
       throw new HttpError(405, '方法不允许');
     }
-    const m = url.pathname.match(/^\/api\/apps\/([0-9a-f]+)(?:\/(start|stop|verify|logs|profile))?$/);
+    const m = url.pathname.match(/^\/api\/apps\/([0-9a-f]+)(?:\/(start|stop|verify|logs|profile|clear-data))?$/);
     if (!m) throw new HttpError(404, '未找到');
     const [, id, action] = m;
     const app = this.apps.find(id);
@@ -237,6 +237,7 @@ export class Sandgate {
       }
       case 'POST start': return this.apps.start(id);
       case 'POST stop': return this.apps.stop(id);
+      case 'POST clear-data': return this.apps.clearData(id);
       case 'POST verify': return this.apps.verify(id);
       case 'GET logs': return { text: this.apps.tail(id) };
       case 'GET profile': return { text: this.apps.profileFor(app) };

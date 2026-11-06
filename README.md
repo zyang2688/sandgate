@@ -261,6 +261,8 @@ SandGate 也会接管配置里名字以 `sandgate-` 或 `sgp-` 开头的端口�
 
 **删除实例时，实例目录会一起删除，无法恢复。**
 
+实例停止时可以点“清空数据”：只删除实例目录里的内容，实例的设置保留，下次启动就像第一次打开。共用数据模式下，程序放在你用户目录里的数据不受影响。
+
 参数和环境变量里可以用这些变量：
 
 | 变量 | 含义 |
@@ -294,8 +296,8 @@ SandGate 也会接管配置里名字以 `sandgate-` 或 `sgp-` 开头的端口�
 | `HOME` | 看数据环境 | 你的用户目录 |
 
 - **自动去掉的参数：** 启动时去掉 `--no-sandbox` 和 `--use-mock-keychain`，否则 Chrome 自带的保护也没了，一层都不剩。
-- **数据目录：** 仍然可以用 `{data}`，Chrome 预设的 `--user-data-dir={data}/profile` 不变，删除实例时一起删除。
-- **切换这个选项会丢失 Chrome 的登录状态：** 实测切换后 Cookie 读不出来，切回去也一样。两种方式的 Cookie 加密密钥不同，所以最好在第一次登录前就选好。
+- **数据目录：** 仍然可以用 `{data}`，Chrome 预设的 `--user-data-dir={data}/profile` 不变，Cookie 和登录状态也在这里，和主 Chrome 分开。删除实例或“清空数据”时一起删除。
+- **切换这个选项会丢失 Chrome 的登录状态：** 实测切换后 Cookie 读不出来，切回去也一样。两种方式的 Cookie 加密密钥不同，所以最好在第一次登录前就选好。已经登录过的，可以先停止实例、点“清空数据”，切换后重新登录。
 - **“全部走一个节点”：** 只靠程序的代理设置，不再有系统强制的保证。
 - **泄漏自检：** 没有沙盒就没有越权操作可测，只检查闸门。
 
@@ -433,7 +435,7 @@ launchctl kickstart -k "gui/$(id -u)/com.sandgate.daemon"
 | `~/.sandgate/profiles/` | 每个实例生成的沙盒配置（`.sb`） |
 | `~/.sandgate/pf/` | 给 pf 用的放行列表 |
 | `~/.sandgate/backups/` | 脚本扩展修改前的备份 |
-| `~/.sandgate-instances/<id>/` | 实例目录，删除实例时一起删除 |
+| `~/.sandgate-instances/<id>/` | 实例目录，删除实例或“清空数据”时删除 |
 | `~/Library/LaunchAgents/com.sandgate.daemon.plist` | 后台服务 |
 | `/Library/LaunchDaemons/com.sandgate.pf.plist` | pf 服务 |
 | `/usr/local/sbin/sandgate-pf` | 安装后的 pf 脚本 |

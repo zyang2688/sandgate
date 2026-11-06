@@ -431,6 +431,8 @@ describe('Web API security', () => {
     assert.equal((await authed('/api/apps', { method: 'POST', body: { name: '', command: '' } })).status, 400);
     const prof = await authed(`/api/apps/${a.json.id}/profile`);
     assert.ok(prof.json.text.includes(`localhost:${a.json.port}`));
+    assert.equal((await authed(`/api/apps/${a.json.id}/clear-data`, { method: 'POST', body: {} })).status, 200);
+    assert.equal((await authed(`/api/apps/${a.json.id}/profile`)).status, 200);
     assert.equal((await authed(`/api/apps/${a.json.id}`, { method: 'DELETE', body: {} })).status, 200);
     assert.equal((await authed(`/api/apps/${a.json.id}/profile`)).status, 404);
   });
@@ -922,6 +924,55 @@ describe('instance isolation', () => {
     test('works when the instance never had a directory', async () => {
       const { manager, add } = setup();
       await manager.remove(add({ isolateHome: false }).id);
+    });
+  });
+
+  describe('clearing an instance\'s data', () => {
+    const setup = () => {
+      const store = new Store(path.join(tmp(), 'data'));
+      const manager = new AppManager({ store, gates: { on() {}, isOpen: () => false }, controllerSocket: () => '' });
+      const add = (over = {}) => {
+        const a = validateApp({ name: 'x', command: '/bin/ls', network: 'none', ...over });
+        store.data.apps.push(a);
+        return a;
+      };
+      const fill = (a) => {
+        fs.mkdirSync(path.join(store.instanceHome(a.id), 'profile'), { recursive: true });
+        fs.writeFileSync(path.join(store.instanceHome(a.id), 'profile/Cookies'), 'x');
+      };
+      return { store, manager, add, fill };
+    };
+
+    test('empties its directory, keeps the instance and other instances', () => {
+      const { store, manager, add, fill } = setup();
+      const [a, b] = [add(), add()];
+      fill(a);
+      fill(b);
+      manager.clearData(a.id);
+      assert.equal(fs.existsSync(store.instanceHome(a.id)), false);
+      assert.ok(store.data.apps.some((x) => x.id === a.id));
+      assert.equal(fs.readFileSync(path.join(store.instanceHome(b.id), 'profile/Cookies'), 'utf8'), 'x');
+    });
+
+    test('does not follow symlinks out of the directory', () => {
+      const { store, manager, add } = setup();
+      const a = add();
+      const outside = tmp();
+      fs.writeFileSync(path.join(outside, 'keep'), 'x');
+      fs.mkdirSync(store.instanceHome(a.id));
+      fs.symlinkSync(outside, path.join(store.instanceHome(a.id), 'link'));
+      manager.clearData(a.id);
+      assert.equal(fs.readFileSync(path.join(outside, 'keep'), 'utf8'), 'x');
+    });
+
+    test('refuses while the instance runs, and works with no directory', () => {
+      const { store, manager, add, fill } = setup();
+      const a = add();
+      manager.clearData(a.id);
+      fill(a);
+      manager.runs.set(a.id, { pid: 1 });
+      assert.throws(() => manager.clearData(a.id), /请先停止/);
+      assert.ok(fs.existsSync(path.join(store.instanceHome(a.id), 'profile/Cookies')));
     });
   });
 

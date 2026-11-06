@@ -221,7 +221,7 @@
       <label>工作目录 <input name="cwd" spellcheck="false" placeholder="~/project"></label>
       <label>环境变量（每行 KEY=VALUE）<textarea name="env" rows="2" spellcheck="false"></textarea></label>
       <label class="check"><input type="checkbox" name="unsandboxed"> 不套沙盒（默认关闭）</label>
-      <p id="unsandboxed-note" class="warn-note" hidden>程序能读写你的所有文件，网络也不由系统强制：走代理的流量走选定的出口，绕过代理的走 Clash 主规则。数据环境固定为共用数据：HOME 就是你的用户目录，没有分身；但参数里的 {data} 仍指向实例自己的目录，所以 Chrome 预设的 --user-data-dir 仍和主 Chrome 分开存放，Cookie 和登录状态也是实例自己的。适合 Chrome 这类自带沙盒的程序，这样它的沙盒和钥匙串都能保留，启动时会自动去掉 --no-sandbox 和 --use-mock-keychain。已有实例切换这个选项后，Chrome 的登录状态会丢失。不要用来运行不信任的程序。</p>
+      <p id="unsandboxed-note" class="warn-note" hidden>程序能读写你的所有文件，网络也不由系统强制：走代理的流量走选定的出口，绕过代理的走 Clash 主规则。数据环境固定为共用数据：HOME 就是你的用户目录，没有分身；但参数里的 {data} 仍指向实例自己的目录，所以 Chrome 预设的 --user-data-dir 仍和主 Chrome 分开存放，Cookie 和登录状态也是实例自己的。适合 Chrome 这类自带沙盒的程序，这样它的沙盒和钥匙串都能保留，启动时会自动去掉 --no-sandbox 和 --use-mock-keychain。已有实例切换这个选项后，Chrome 的登录状态和保存的密码会读不出来，需要重新登录；可以先停止实例，用“清空数据”从头开始。不要用来运行不信任的程序。</p>
       <div id="sandbox-fields" class="stack">
       <label>数据环境
         <select name="dataMode">

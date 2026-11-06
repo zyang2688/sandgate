@@ -159,6 +159,7 @@ function appCard(a) {
       <button class="btn" data-act="logs" data-id="${a.id}">日志</button>
       <button class="btn" data-act="profile" data-id="${a.id}" ${a.unsandboxed ? 'disabled' : ''}>沙盒配置</button>
       <button class="btn" data-act="edit" data-id="${a.id}">编辑</button>
+      <button class="btn" data-act="clear-data" data-id="${a.id}" ${a.running ? 'disabled' : ''}>清空数据</button>
       <button class="btn" data-act="delete" data-id="${a.id}" ${a.running ? 'disabled' : ''}>删除</button>
     </div>
   </div>`;
@@ -218,8 +219,9 @@ $('accept-rules').addEventListener('click', async () => {
 // Our own dialog: native confirm() blocks the whole page, including status updates.
 let confirmAction = null;
 
-function askConfirm({ title, detail, action }) {
+function askConfirm({ title, detail, action, ok = '删除' }) {
   $('confirm-title').textContent = title;
+  $('confirm-ok').textContent = ok;
   $('confirm-detail').textContent = detail;
   $('confirm-error').textContent = '';
   $('confirm-ok').disabled = false;
@@ -260,6 +262,19 @@ $('apps').addEventListener('click', async (e) => {
           await api(`apps/${id}`, { method: 'DELETE', body: {} });
           refresh();
         },
+      });
+    }
+    if (act === 'clear-data') {
+      return askConfirm({
+        title: `清空实例「${app.name}」的数据？`,
+        detail: `实例目录 ~/.sandgate-instances/${id} 里的内容会全部删除，无法恢复，下次启动就像第一次打开。实例的设置保留。${app.isolateHome
+          ? '里面的配置、缓存、登录状态和保存的密码都会丢失。'
+          : '用 {data} 存放的数据会丢失，例如 Chrome 预设的 Cookie、登录状态和保存的密码。程序放在你用户目录里的数据不受影响。'}`,
+        action: async () => {
+          await api(`apps/${id}/clear-data`, { method: 'POST' });
+          refresh();
+        },
+        ok: '清空',
       });
     }
     if (act === 'logs') {
